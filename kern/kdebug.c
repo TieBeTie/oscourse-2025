@@ -67,6 +67,8 @@ debuginfo_rip(uintptr_t addr, struct Ripdebuginfo *info) {
      * Hint: use line_for_address from kern/dwarf_lines.c */
 
     // LAB 2: Your res here:
+    res = line_for_address(&addrs, addr - CALL_INSN_LEN, line_offset, &info->rip_line);
+    if (res < 0) goto error;
 
     /* Find function name corresponding to given address.
      * Hint: note that we need the address of `call` instruction, but rip holds
@@ -76,6 +78,10 @@ debuginfo_rip(uintptr_t addr, struct Ripdebuginfo *info) {
      * string returned by function_by_info will always be */
 
     // LAB 2: Your res here:
+    res = function_by_info(&addrs, addr - CALL_INSN_LEN, offset, &tmp_buf, &info->rip_fn_addr);
+    if (res < 0) goto error;
+    strncpy(info->rip_fn_name, tmp_buf, sizeof(info->rip_fn_name));
+    info->rip_fn_namelen = strnlen(info->rip_fn_name, sizeof(info->rip_fn_name));
 
 error:
     return res;
@@ -90,6 +96,34 @@ find_function(const char *const fname) {
      * in assembly. */
 
     // LAB 3: Your code here:
+
+    // Check for assembly-defined functions first
+    extern void sys_exit(void);
+    extern void sys_yield(void);
+
+    if (!strncmp(fname, "sys_exit", 256)) {
+        return (uintptr_t)sys_exit;
+    }
+    if (!strncmp(fname, "sys_yield", 256)) {
+        return (uintptr_t)sys_yield;
+    }
+
+    struct Dwarf_Addrs addrs;
+    load_kernel_dwarf_info(&addrs);
+
+    uintptr_t addr = 0;
+
+    // Try optimized lookup first
+    int res = address_by_fname(&addrs, fname, &addr);
+    if (res == 0 && addr != 0) {
+        return addr;
+    }
+
+    // Fallback to naive lookup for assembly functions
+    res = naive_address_by_fname(&addrs, fname, &addr);
+    if (res == 0 && addr != 0) {
+        return addr;
+    }
 
     return 0;
 }
