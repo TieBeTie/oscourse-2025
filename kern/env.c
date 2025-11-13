@@ -15,6 +15,8 @@
 #include <kern/macro.h>
 #include <kern/traceopt.h>
 
+extern struct Pseudodesc gdt_pd;
+
 /* Currently active environment */
 struct Env *curenv = NULL;
 
@@ -30,23 +32,6 @@ struct Env *envs = NULL;
 /* Free environment list
  * (linked by Env->env_link) */
 static struct Env *env_free_list;
-
-/* Global Descriptor Table */
-struct Segdesc32 gdt[7 + 2 * NCPU] = {
-    [0] = SEG_NULL, /* Null descriptor */
-    [GD_KT / sizeof(struct Segdesc32)] = SEG64(STA_X | STA_R, 0x0, 0xffffffff, 0),
-    [GD_KD / sizeof(struct Segdesc32)] = SEG64(STA_W, 0x0, 0xffffffff, 0),
-    [GD_KT32 / sizeof(struct Segdesc32)] = SEG32(STA_X | STA_R, 0x0, 0xffffffff, 0),
-    [GD_KD32 / sizeof(struct Segdesc32)] = SEG32(STA_W, 0x0, 0xffffffff, 0),
-    [GD_UT / sizeof(struct Segdesc32)] = SEG64(STA_X | STA_R, 0x0, 0xffffffff, 3),
-    [GD_UD / sizeof(struct Segdesc32)] = SEG64(STA_W, 0x0, 0xffffffff, 3),
-    [GD_TSS0 / sizeof(struct Segdesc32)] = SEG_NULL, /* Task state segment */
-};
-
-struct Pseudodesc gdt_pd = {
-    sizeof(gdt) - 1, /* Limit */
-    (unsigned long)gdt /* Address */
-};
 
 /* NOTE: Should be at least LOGNENV */
 #define ENVGENSHIFT 12
