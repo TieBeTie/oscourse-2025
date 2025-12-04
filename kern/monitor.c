@@ -28,6 +28,7 @@ int mon_dumpcmos(int argc, char **argv, struct Trapframe *tf);
 int mon_start(int argc, char **argv, struct Trapframe *tf);
 int mon_stop(int argc, char **argv, struct Trapframe *tf);
 int mon_frequency(int argc, char **argv, struct Trapframe *tf);
+int mon_hello(int argc, char **argv, struct Trapframe *tf);
 
 struct Command {
     const char *name;
@@ -44,6 +45,7 @@ static struct Command commands[] = {
         {"timer_start", "Start timer", mon_start},
         {"timer_stop", "Stop timer", mon_stop},
         {"timer_freq", "Get timer frequency", mon_frequency},
+        {"hello", "Print a greeting message", mon_hello},
 };
 #define NCOMMANDS (sizeof(commands) / sizeof(commands[0]))
 
@@ -73,7 +75,34 @@ mon_kerninfo(int argc, char **argv, struct Trapframe *tf) {
 int
 mon_backtrace(int argc, char **argv, struct Trapframe *tf) {
     // LAB 2: Your code here
+    cprintf("Stack backtrace:\n");
 
+    struct Ripdebuginfo info;
+    uint64_t rbp = read_rbp();
+
+    while (rbp != 0) {
+        uint64_t *rbp_ptr = (uint64_t *)rbp;
+        uint64_t rip = rbp_ptr[1];
+
+        cprintf("  rbp %016lx  rip %016lx\n", rbp, rip);
+
+        if (debuginfo_rip(rip, &info) == 0) {
+            cprintf("    %s:%d: %.*s+%ld\n",
+                    info.rip_file, info.rip_line,
+                    info.rip_fn_namelen, info.rip_fn_name,
+                    rip - info.rip_fn_addr);
+        }
+
+        rbp = rbp_ptr[0];
+    }
+
+    return 0;
+}
+
+int
+mon_hello(int argc, char **argv, struct Trapframe *tf) {
+    cprintf("Hello from JOS kernel monitor!\n");
+    cprintf("Lab 2 implementation by kozhagulov.r\n");
     return 0;
 }
 
