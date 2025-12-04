@@ -16,6 +16,7 @@
 #include <kern/timer.h>
 #include <kern/env.h>
 #include <kern/trap.h>
+#include <kern/pmap.h>
 
 #define WHITESPACE "\t\r\n "
 #define MAXARGS    16
@@ -28,6 +29,7 @@ int mon_dumpcmos(int argc, char **argv, struct Trapframe *tf);
 int mon_start(int argc, char **argv, struct Trapframe *tf);
 int mon_stop(int argc, char **argv, struct Trapframe *tf);
 int mon_frequency(int argc, char **argv, struct Trapframe *tf);
+int mon_memory(int argc, char **argv, struct Trapframe *tf);
 int mon_hello(int argc, char **argv, struct Trapframe *tf);
 
 struct Command {
@@ -45,6 +47,7 @@ static struct Command commands[] = {
         {"timer_start", "Start timer", mon_start},
         {"timer_stop", "Stop timer", mon_stop},
         {"timer_freq", "Get timer frequency", mon_frequency},
+        {"memory", "Display free memory pages", mon_memory},
         {"hello", "Print a greeting message", mon_hello},
 };
 #define NCOMMANDS (sizeof(commands) / sizeof(commands[0]))
@@ -148,6 +151,18 @@ mon_dumpcmos(int argc, char **argv, struct Trapframe *tf) {
         cprintf("\n");
     }
 
+    return 0;
+}
+
+/*
+ * Monitor command to display free memory pages.
+ * 
+ * Calls dump_memory_lists() to show current state of free page allocation
+ * grouped by class size. This helps debug and monitor memory allocator state.
+ */
+int
+mon_memory(int argc, char **argv, struct Trapframe *tf) {
+    dump_memory_lists();
     return 0;
 }
 
