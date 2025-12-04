@@ -98,15 +98,22 @@ mon_hello(int argc, char **argv, struct Trapframe *tf) {
     return 0;
 }
 
+// Dump CMOS memory in the following format:
+// 00: 00 11 22 33 44 55 66 77 88 99 AA BB CC DD EE FF
+// 10: 00 ..
+//
+// Make sure you understand the values read.
+// Hint: Use cmos_read8()/cmos_write8() functions.
+//
 // LAB 4: Your code here
 int
 mon_dumpcmos(int argc, char **argv, struct Trapframe *tf) {
-    // Dump CMOS memory in the following format:
-    // 00: 00 11 22 33 44 55 66 77 88 99 AA BB CC DD EE FF
-    // 10: 00 ..
-    // Make sure you understand the values read.
-    // Hint: Use cmos_read8()/cmos_write8() functions.
-    // LAB 4: Your code here
+    for (int i = 0; i < CMOS_START + CMOS_SIZE; i += 0x10) {
+        cprintf("%02x:", i);
+        for (int j = i; j < i + 0x10; j++)
+            cprintf(" %02x", cmos_read8(j));
+        cprintf("\n");
+    }
 
     return 0;
 }
