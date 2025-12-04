@@ -98,6 +98,10 @@ trap_init(void) {
     extern void clock_thdlr(void);
     idt[IRQ_OFFSET + IRQ_CLOCK] = GATE(0, GD_KT, clock_thdlr, 0);
 
+    /* LAB 5: timer interrupt handler (HPET/PIT/RTC abstraction). */
+    extern void timer_thdlr(void);
+    idt[IRQ_OFFSET + IRQ_TIMER] = GATE(0, GD_KT, timer_thdlr, 0);
+
     /* Per-CPU setup */
     trap_init_percpu();
 }
@@ -212,8 +216,12 @@ trap_dispatch(struct Trapframe *tf) {
             print_trapframe(tf);
         }
         return;
+    case IRQ_OFFSET + IRQ_TIMER:
     case IRQ_OFFSET + IRQ_CLOCK:
-        rtc_timer_pic_handle();
+        /* Route both PIT/HPET (IRQ_TIMER) and RTC (IRQ_CLOCK) through the
+         * abstract timer interface so that the scheduler can work with any
+         * configured timer. */
+        timer_for_schedule->handle_interrupts();
         sched_yield();
         return;
     default:
