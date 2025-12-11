@@ -191,25 +191,89 @@ print_timer_error(void) {
 /* Use print_time function to print timert result
  * Use print_timer_error function to print error. */
 
-// LAB 5: Your code here:
+/* For this lab we build a simple stopwatch based on the TSC. Intel SDM
+ * (Vol. 3, sec. 19.17 "Time-Stamp Counter") describes the TSC as:
+ *   "a 64-bit counter that is set to 0 following a RESET of the processor"
+ *   and, on older cores, "increments with every internal processor clock cycle",
+ *   while on newer cores it can "increment at a constant rate".
+ * The RDTSC instruction "is guaranteed to return a monotonically increasing
+ * unique value whenever executed, except for a 64-bit counter wraparound".
+ * Knowing CPU frequency from one of the hardware timers, we convert TSC
+ * deltas to elapsed time in seconds. */
 
 static bool timer_started = 0;
-static int timer_id = -1;
 static uint64_t timer = 0;
 static uint64_t freq = 0;
 
 void
 timer_start(const char *name) {
-    (void)timer_started;
-    (void)timer_id;
-    (void)timer;
-    (void)freq;
+    /* Choose which underlying timer to use for CPU frequency measurement. */
+    if (!name) {
+        print_timer_error();
+        return;
+    }
+
+    uint64_t f = 0;
+    if (!strcmp(name, "pit")) {
+        f = tsc_calibrate();
+    } else if (!strcmp(name, "hpet0") || !strcmp(name, "hpet1")) {
+        f = hpet_cpu_frequency();
+    } else if (!strcmp(name, "pm")) {
+        f = pmtimer_cpu_frequency();
+    } else {
+        print_timer_error();
+        return;
+    }
+
+    freq = f;
+    /* Intel SDM Vol. 2B, sec. 4-558 "RDTSC—Read Time-Stamp Counter": Reads the current
+     * value of the processor's time-stamp counter into EDX:EAX. The counter "monotonically
+     * increments every clock cycle and resets it to 0 whenever the processor is reset." */
+    timer = read_tsc();
+    timer_started = 1;
 }
 
 void
 timer_stop(void) {
+    if (!timer_started) {
+        /* As required by the assignment: calling stop without start is an
+         * error. */
+        print_timer_error();
+        return;
+    }
+
+    /* Intel SDM Vol. 2B, sec. 4-558 "RDTSC": Read current TSC value to compute elapsed time. */
+    uint64_t now = read_tsc();
+    uint64_t delta = now - timer;
+    if (!freq) {
+        print_timer_error();
+        return;
+    }
+
+    unsigned seconds = (unsigned)(delta / freq);
+    print_time(seconds);
+    timer_started = 0;
 }
 
 void
 timer_cpu_frequency(const char *name) {
+    if (!name) {
+        print_timer_error();
+        return;
+    }
+
+    uint64_t f = 0;
+    if (!strcmp(name, "pit")) {
+        f = tsc_calibrate();
+    } else if (!strcmp(name, "hpet0") || !strcmp(name, "hpet1")) {
+        f = hpet_cpu_frequency();
+    } else if (!strcmp(name, "pm")) {
+        f = pmtimer_cpu_frequency();
+    } else {
+        print_timer_error();
+        return;
+    }
+
+    unsigned hz = (unsigned)f;
+    print_time(hz);
 }

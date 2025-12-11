@@ -12,6 +12,11 @@ static Header base = {.next = (Header *)space, .prev = (Header *)space};
 /* start of free list */
 static Header *freep = NULL;
 
+/* Protect the global free list with a spinlock to avoid races between
+ * concurrent alloc/free operations (classic allocator race described, e.g.,
+ * in many OS textbooks). */
+static struct spinlock alloc_lock;
+
 static void
 check_list(void) {
     asm volatile("cli");
@@ -28,7 +33,7 @@ void *
 test_alloc(uint8_t nbytes) {
 
     /* Make allocator thread-safe with the help of spin_lock/spin_unlock. */
-    // LAB 5: Your code here:
+    spin_lock(&alloc_lock);
 
     size_t nunits = (nbytes + sizeof(Header) - 1) / sizeof(Header) + 1;
 
@@ -58,11 +63,14 @@ test_alloc(uint8_t nbytes) {
                 p += p->size;
                 p->size = nunits;
             }
-            return (void *)(p + 1);
+            void *res = (void *)(p + 1);
+            spin_unlock(&alloc_lock);
+            return res;
         }
 
         /* wrapped around free list */
         if (p == freep) {
+            spin_unlock(&alloc_lock);
             return NULL;
         }
     }
@@ -76,7 +84,7 @@ test_free(void *ap) {
     Header *bp = (Header *)ap - 1;
 
     /* Make allocator thread-safe with the help of spin_lock/spin_unlock. */
-    // LAB 5: Your code here
+    spin_lock(&alloc_lock);
 
     /* freed block at start or end of arena */
     Header *p = freep;
@@ -104,4 +112,5 @@ test_free(void *ap) {
     freep = p;
 
     check_list();
+    spin_unlock(&alloc_lock);
 }
