@@ -1,0 +1,22 @@
+Лабораторная работа №5 — план и оглавление
+
+1. Поддержка HPET
+   1.1 Найти таблицы ACPI (RSDP, HPET) и реализовать find_acpi_table / get_rsdp / get_hpet
+   1.2 Настроить таймеры hpet0 (0.5 c) и hpet1 (1.5 c), включить LegacyReplacement
+   1.3 Добавить обработку прерываний HPET: hpet_enable_interrupts_timX, hpet_handle_interrupts_timX, trap_init, handle_interrupts
+   1.4 Проверить выбор таймера в timers_init (hpet0, hpet1, rtc)
+
+2. Синхронизация между процессами (spinlock)
+   2.1 Защитить test_alloc и test_free (alloc.c) спинлоками spin_lock / spin_unlock
+   2.2 Проверка: отсутствие повреждения списка свободных страниц (panic “Corrupted list”), увеличение частоты таймера для воспроизведения
+
+3. Time Stamp Counter (TSC) секундомер
+   3.1 Реализовать timer_start, timer_stop, timer_cpu_frequency (tsc.c)
+   3.2 Реализовать hpet_cpu_frequency, pmtimer_cpu_frequency; учесть 24/32-битность PMTimer
+   3.3 Команды монитора: timer_start, timer_stop, timer_freq; отключить автозапуск программ в kern/init.c
+   3.4 Учесть ограничения PIT/VirtualBox; при необходимости калибровать другими таймерами
+
+4. Общие требования
+   4.1 Всегда сопровождать объяснения цитатами из спецификаций (ACPI, HPET, Intel SDM, др.)
+   4.2 Структура отчёта: вопрос/подпункт → цитата → краткий ответ/код-заметка
+

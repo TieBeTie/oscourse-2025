@@ -1,0 +1,304 @@
+\documentclass[a4paper,12pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[russian]{babel}
+\usepackage{geometry}
+\usepackage[hidelinks]{hyperref}
+\geometry{margin=2.5cm}
+\setcounter{secnumdepth}{3}
+\setcounter{tocdepth}{3}
+\title{Лабораторная работа №6}
+\author{}
+\date{}
+\begin{document}
+\maketitle
+
+\tableofcontents
+\newpage
+
+\section{Как устроена память в UEFI? Какие механизмы используются для маппинга памяти? Расскажите про работу функций ExitBootServices и SetVirtualAddressMap.}
+\subsection{Модель памяти и Memory Map (что это и откуда берётся)}
+\begin{quote}
+``EFI\_MEMORY\_ATTRIBUTES\_TABLE provides additional information about regions within the run-time memory blocks defined in the EFI\_MEMORY\_DESCRIPTOR entries returned from EFI\_BOOT\_SERVICES.GetMemoryMap() function.'' (\texttt{UEFI-2.11.md})
+\end{quote}
+Memory Map — это список EFI\_MEMORY\_DESCRIPTOR, который возвращает вызов GetMemoryMap(); он описывает все области памяти для ОС. EFI\_MEMORY\_DESCRIPTOR задаёт тип региона, физический и виртуальный адреса начала, число страниц и битовую маску атрибутов; именно так UEFI передаёт операционной системе (OS) карту памяти. Таблица EFI\_MEMORY\_ATTRIBUTES\_TABLE публикуется прошивкой как конфигурационная и не добавляет новые области, а уточняет атрибуты кешируемости/защиты для уже известных рантайм-диапазонов из GetMemoryMap().
+\begin{quote}
+``recommended that all UEFI modules that comprise the Runtime Services be represented in the MemoryMap as a single EFI\_MEMORY\_DESCRIPTOR of Type EfiRuntimeServicesCode. In all cases memory used by the runtime services must be reserved and not used by the OS.'' (\texttt{UEFI-2.11.md})
+\end{quote}
+Области Runtime Services помечаются типом EfiRuntimeServicesCode и резервируются: ОС не должна их перераспределять.
+
+
+
+
+\subsubsection{Что такое Runtime Services}
+\begin{quote}
+``In all cases memory used by the runtime services must be reserved and not used by the OS. runtime services memory is always available to an UEFI function and will never be directly manipulated by the OS or its components. UEFI is responsible for defining the hardware resources used by runtime services, so the OS can synchronize with those resources when runtime service calls are made, or guarantee that the OS never uses those resources.'' (\texttt{UEFI-2.11.md})
+\end{quote}
+Runtime Services — набор функций прошивки (время, переменные, таймеры, таблицы), доступных после ExitBootServices; их память резервируется прошивкой и не должна использоваться ОС.
+
+\subsubsection{Где определяется структура дескриптора}
+\begin{quote}
+``An array of memory descriptors which contain new virtual address mapping information for all runtime ranges. Type EFI\_MEMORY\_DESCRIPTOR is defined in the EFI\_BOOT\_SERVICES.GetMemoryMap() function description.'' (\texttt{UEFI-2.11.md})
+\end{quote}
+Определение EFI\_MEMORY\_DESCRIPTOR дано в описании GetMemoryMap; через VirtualMap ОС получает виртуальные отображения для runtime‑диапазонов.
+
+
+\subsubsection{Структура дескриптора памяти}
+\begin{quote}
+``typedef struct \{ UINT32 Type; EFI\_PHYSICAL\_ADDRESS PhysicalStart; EFI\_VIRTUAL\_ADDRESS VirtualStart; UINT64 NumberOfPages; UINT64 Attribute; \} EFI\_MEMORY\_DESCRIPTOR;'' (\texttt{UEFI-2.11.md})
+\end{quote}
+
+\subsection{Какие механизмы используются для маппинга памяти?}
+Итог: применяются три шага: GetMemoryMap() отдаёт список EFI\_MEMORY\_DESCRIPTOR; атрибуты/EFI\_MEMORY\_ATTRIBUTES\_TABLE уточняют кешируемость/защиту; SetVirtualAddressMap закрепляет виртуальные адреса для Runtime Services.
+\subsubsection{Получение карты памяти: GetMemoryMap}
+\begin{quote}
+``EFI\_MEMORY\_ATTRIBUTES\_TABLE provides additional information about regions within the run-time memory blocks defined in the EFI\_MEMORY\_DESCRIPTOR entries returned from EFI\_BOOT\_SERVICES.GetMemoryMap() function.'' (\texttt{UEFI-2.11.md})
+\end{quote}
+GetMemoryMap() возвращает массив EFI\_MEMORY\_DESCRIPTOR — исходную карту памяти для ОС.
+\subsubsection{Уточнение атрибутов: EFI\_MEMORY\_ATTRIBUTES\_TABLE}
+\begin{quote}
+``EFI\_MEMORY\_ATTRIBUTES\_TABLE provides additional information about regions within the run-time memory blocks defined in the EFI\_MEMORY\_DESCRIPTOR entries returned from EFI\_BOOT\_SERVICES.GetMemoryMap(). ... If a run-time region returned in GetMemoryMap() entry is not described within the Memory Attributes Table, this region is assumed to not be compatible with any memory protections.'' (\texttt{UEFI-2.11.md})
+\end{quote}
+Таблица дополняет дескрипторы сведениями о защите/кешируемости для рантайм-областей.
+\subsubsection{Фиксация виртуальных адресов: SetVirtualAddressMap}
+\begin{quote}
+``A runtime driver of type EFI\_IMAGE\_SUBSYSTEM\_EFI\_RUNTIME\_DRIVER gets fixed up with virtual mappngs when the OS calls SetVirtualAddressMap().'' (\texttt{UEFI-2.11.md})
+\end{quote}
+ОС вызывает SetVirtualAddressMap, чтобы закрепить виртуальные адреса для runtime‑драйверов, чтобы они работали в среде ОС.
+
+\subsubsection{Атрибуты памяти и их смысл}
+\begin{quote}
+``\#define EFI\_MEMORY\_UC 0x1 ... \#define EFI\_MEMORY\_RUNTIME 0x8000000000000000 ... EFI\_MEMORY\_RUNTIME Runtime memory attribute: The memory region needs to be given a virtual mapping by the operating system when SetVirtualAddressMap() is called.'' (\texttt{UEFI-2.11.md})
+\end{quote}
+Атрибуты описывают поддерживаемые режимы кешируемости (например, EFI\_MEMORY\_WB), защиты (например, EFI\_MEMORY\_XP для запрета исполнения) и специальные флаги вроде EFI\_MEMORY\_RUNTIME, требующего виртуального отображения. Эти значения прошивка записывает в поле Attribute каждого EFI\_MEMORY\_DESCRIPTOR, полученного через GetMemoryMap(); ОС обязана на их основе выставить кеш/защиту при построении виртуальных отображений (в том числе при вызове SetVirtualAddressMap).
+\subsubsection{Требования к отображению runtime- и ACPI-областей}
+\begin{quote}
+``The system address regions described by all the entries in the EFI memory map that have the EFI\_MEMORY\_RUNTIME bit set must be identity mapped as they were for the EFI boot environment. If the OS Loader or OS used SetVirtualAddressMap() to relocate the runtime services in a virtual address space, then this condition does not have to be met.'' (\texttt{UEFI-2.11.md})
+\end{quote}
+\begin{quote}
+``The system firmware must not request a virtual mapping for any memory descriptor of type EfiACPIReclaimMemory or EfiACPIMemoryNVS. ... An ACPI Memory Op-region must inherit cacheability attributes from the UEFI memory map ... if no cacheability attributes exist ... then the region must be assumed to be non-cacheable.'' (\texttt{UEFI-2.11.md})
+\end{quote}
+Регионы с флагом EFI\_MEMORY\_RUNTIME должны быть идентично отображены до вызова SetVirtualAddressMap, после чего могут получить виртуальные адреса. Для ACPI (Advanced Configuration and Power Interface) областей запрещено требовать виртуальное отображение; их кешируемость наследуется из карты памяти или ACPI-описаний, иначе считаются некешируемыми.
+
+\subsection{Работа ExitBootServices}
+\subsubsection{Что делает ExitBootServices}
+\begin{quote}
+``UEFI boot service drivers are terminated when ExitBootServices() is called, and all the memory resources consumed by the UEFI boot service drivers are released for use in the operating system environment.'' (\texttt{UEFI-2.11.md})
+\end{quote}
+ExitBootServices завершает boot‑драйверы и освобождает их память для ОС; области Runtime Services из Memory Map остаются зарезервированными и не отдаются ОС.
+\subsubsection{Когда вызывается ExitBootServices}
+\begin{quote}
+``following a call to a specific interface function. One example of this is the cleanup that needs to be performed in response to a call to the EFI\_BOOT\_SERVICES.ExitBootServices() function. ExitBootServices() can clean up the firmware since it understands firmware internals, but it cannot clean up on behalf of drivers that have been loaded into the system.'' (\texttt{UEFI-2.11.md})
+\end{quote}
+ExitBootServices вызывается загрузчиком ОС на границе передачи управления: прошивка выполняет свой cleanup, а драйверы должны подписаться на событие EVT\_SIGNAL\_EXIT\_BOOT\_SERVICES, чтобы убрать своё состояние перед выходом из boot‑сервисов.
+
+\subsection{Работа SetVirtualAddressMap}
+\subsubsection{Когда и зачем вызывается SetVirtualAddressMap}
+\begin{quote}
+``A runtime driver of type EFI\_IMAGE\_SUBSYSTEM\_EFI\_RUNTIME\_DRIVER gets fixed up with virtual mappngs when the OS calls SetVirtualAddressMap().'' (\texttt{UEFI-2.11.md})
+\end{quote}
+После ExitBootServices ОС вызывает SetVirtualAddressMap, чтобы «перепрошить» runtime‑драйверы на виртуальные адреса и сохранить их работоспособность.
+\subsubsection{Кто вызывает и что делает SetVirtualAddressMap}
+\begin{quote}
+``The SetVirtualAddressMap() function is used by the OS loader. The function can only be called at runtime, and is called by the owner of the system’s memory map: i.e., the component which called EFI\_BOOT\_SERVICES.ExitBootServices(). All events of type EVT\_SIGNAL\_VIRTUAL\_ADDRESS\_CHANGE must be signaled before SetVirtualAddressMap() returns. This call changes the addresses of the runtime components of the EFI firmware to the new virtual addresses supplied'' (\texttt{UEFI-2.11.md})
+\end{quote}
+Вызов делает загрузчик/ОС один раз после ExitBootServices, когда переводит систему в виртуальный режим адресации. Перед возвратом прошивка сигнализирует EVT\_SIGNAL\_VIRTUAL\_ADDRESS\_CHANGE (EVT — Event) и применяет fix-up: runtime‑драйверы получают виртуальные адреса, а таблицы/указатели Runtime Services конвертируются (через ConvertPointer) для работы в среде ОС.
+
+\section{Расскажите о динамическом инструментировании. Как устроен UBSan? В чём преимущества динамического инструментирования перед статическим анализом.}
+\subsection{Динамическое инструментирование}
+Итог: UBSan (Undefined Behavior Sanitizer) — динамическое инструментирование Clang: проверки UB вставляются при компиляции и выполняются в рантайме.
+Итог: UBSan — динамическое инструментирование Clang: проверки UB вставляются при компиляции и выполняются в рантайме.
+\subsubsection{Определение (UBSan)}
+\begin{quote}
+``UndefinedBehaviorSanitizer (UBSan) is a fast undefined behavior detector. UBSan modifies the program at compile-time to catch various kinds of undefined behavior during program execution.'' (\texttt{https://clang.llvm.org/docs/UndefinedBehaviorSanitizer.html})
+\end{quote}
+Динамическое инструментирование в UBSan — компилятор вставляет проверки (инструментацию) при сборке, они выполняются в рантайме и ловят неопределённое поведение.
+
+\subsubsection{Как включить UBSan}
+\begin{quote}
+``Use clang++ to compile and link your program with the -fsanitize=undefined option.'' (\texttt{https://clang.llvm.org/docs/UndefinedBehaviorSanitizer.html})
+\end{quote}
+Для включения достаточно собрать с \texttt{-fsanitize=undefined}, чтобы компилятор добавил проверки и подключил рантайм (UndefinedBehaviorSanitizer).
+
+\subsection{Устройство UBSan}
+Итог: вставляет проверки UB, опционально подключает рантайм для отчётности, поддерживает режимы завершения recover/trap.
+Итог: вставляет проверки UB, опционально подключает рантайм для отчётности, поддерживает recover/trap режимы.
+\subsubsection{Какие проверки выполняет UBSan}
+\begin{quote}
+``UndefinedBehaviorSanitizer (UBSan) is a fast undefined behavior detector. UBSan modifies the program at compile-time to catch various kinds of undefined behavior during program execution.'' (\texttt{https://clang.llvm.org/docs/UndefinedBehaviorSanitizer.html})
+\end{quote}
+UBSan вставляет проверки на неопределённое поведение (арифметика, доступы, типы и т.п.), срабатывающие во время выполнения.
+
+\subsubsection{Рантайм и стоимость}
+\begin{quote}
+``UBSan has an optional run-time library which provides better error reporting. The checks have small runtime cost and no impact on address space layout or ABI.'' (\texttt{https://clang.llvm.org/docs/UndefinedBehaviorSanitizer.html})
+\end{quote}
+UBSan использует опциональную рантайм-библиотеку: при сборке с \texttt{-fsanitize=undefined} компилятор вставляет вызовы \_\_ubsan\_handle\_\* в проверочные функции, которые обрабатываются рантаймом (обычно \texttt{libclang\_rt.ubsan\_standalone/libubsan}) и выводят отчёты. Накладные расходы малы и не меняют размещение адресного пространства или ABI (Application Binary Interface). При \texttt{-fsanitize-trap} можно обойтись без рантайма, но без подробных отчётов.
+
+\subsubsection{Режимы завершения}
+\begin{quote}
+``-fno-sanitize-recover=...: print a verbose error report and exit the program; -fsanitize-trap=...: execute a trap instruction (doesn’t require UBSan run-time support).'' (\texttt{https://clang.llvm.org/docs/UndefinedBehaviorSanitizer.html})
+\end{quote}
+Можно выбирать: завершать программу с отчётом (\texttt{-fno-sanitize-recover}) или срабатывать trap без рантайма (\texttt{-fsanitize-trap}).
+
+\subsection{Преимущества перед статическим анализом}
+Итог: ловит UB при реальном выполнении с низкими накладными расходами и без изменения ABI, дополняя статический анализ.
+\subsubsection{Почему выгодно динамическое инструментирование}
+\begin{quote}
+``UndefinedBehaviorSanitizer (UBSan) is a fast undefined behavior detector... The checks have small runtime cost and no impact on address space layout or ABI.'' (\texttt{https://clang.llvm.org/docs/UndefinedBehaviorSanitizer.html})
+\end{quote}
+Динамическое инструментирование ловит неопределённое поведение в реальном выполнении, давая практическое покрытие, а накладные расходы малы и не меняют ABI, поэтому метод дополняет статический анализ, который может пропустить ошибки исполнения.
+\subsubsection{Что такое статический анализ}
+\begin{quote}
+``The Clang Static Analyzer is a source code analysis tool that finds bugs in C, C++, and Objective-C programs.'' (\texttt{https://clang.llvm.org/docs/ClangStaticAnalyzer.html})
+\end{quote}
+Статический анализ исследует исходники без запуска программы (например, Clang Static Analyzer, clang-tidy); находит потенциальные дефекты по моделям исполнения, но не видит ошибок, проявляющихся только при конкретных входных данных/окружении.
+\subsubsection{Сравнение динамического и статического анализа}
+\begin{center}
+\begin{tabular}{|p{4.2cm}|p{5.1cm}|p{5.1cm}|}
+\hline
+Критерий & Динамическое инструментирование (UBSan) & Статический анализ (Clang Static Analyzer) \\
+\hline
+Когда работает & Во время исполнения, на реальных данных & Без запуска, по исходникам/IR \\
+\hline
+Что ловит & Фактические UB при конкретном прогоне; точное место/стек & Потенциальные дефекты по путям; возможны ложные срабатывания/пропуски \\
+\hline
+Накладные расходы & Небольшой runtime overhead; ABI не меняется & Нет runtime overhead, но время анализа при сборке \\
+\hline
+Зависимость от окружения & Видит ошибки, зависящие от входов/системы & Не зависит от входов, но не подтверждает наличие ошибки на конкретном прогоне \\
+\hline
+Рантайм/отчёты & Требует рантайм (libubsan) для отчётов; trap без отчёта & Без рантайма; отчёт формируется анализатором \\
+\hline
+\end{tabular}
+\end{center}
+
+\section{Каким образом происходит взаимодействие с PCIe устройствами в x86-системах? Что такое posted и non-posted memory transactions? Что используется для чего в PCI?}
+\textbf{Что такое PCI Express (PCIe).}
+\begin{quote}
+``PCI Express® Base Specification Revision 5.0 Version 1.0'' (\texttt{PCIe-5.0.md})
+\end{quote}
+PCI Express — последовательная пакетная шина на системной плате (например, слот под видеокарту), имеет три уровня: Physical (линии/кодирование), Data Link (DL, обеспечивает надёжность/нумерацию пакетов), Transaction Layer (формирует TLP — Transaction Layer Packet с запросами/ответами). Обмен идёт между Root Complex (RC, контроллер на стороне CPU/чипсета) и устройствами; используются posted/non-posted запросы, Completions, атрибуты упорядочивания (Relaxed/ID-Based Ordering, RO/IDO) и сервисы ACS (Access Control Services) для контроля доставки.
+\subsection{Каким образом происходит взаимодействие с PCIe
+устройствами в x86-системах?}
+\subsubsection{Transaction Layer и TLP}
+\begin{quote}
+``The Layer that operates at the level of transactions (for example, read, write).'' (\texttt{PCIe-5.0.md})
+\end{quote}
+\begin{quote}
+``Transaction Layer Packet, TLP — A Packet generated in the Transaction Layer to convey a Request or Completion.'' (\texttt{PCIe-5.0.md})
+\end{quote}
+Transaction Layer формирует TLP для всех транзакций: Request (например, Memory Read/Write) и Completion. Взаимодействие в x86-системе — обмен TLP между хостом (Root Complex) и устройствами; каждый TLP несёт тип (posted/non-posted), адрес/ID и атрибуты упорядочивания.
+\subsubsection{Последовательность транзакции}
+\begin{quote}
+``transaction sequence — A single Request and zero or more Completions associated with carrying out a single logical transfer by a Requester.'' (\texttt{PCIe-5.0.md})
+\end{quote}
+Логическая транзакция — это цепочка TLP: один Request и 0..N Completion. В posted (например, Memory Write) ответ не приходит; в non-posted (Memory Read, I/O/Config) обязательно приходит Completion с данными/статусом, которое завершает операцию.
+\subsubsection{Где хранятся и идут Completions}
+\begin{quote}
+``Memory address ranges, such as work and completion queue structures, data buffers for low-latency communications, graphics frame buffers, host memory that is used to cache Function-specific content, and so [on].'' (\texttt{PCIe-5.0.md})
+\end{quote}
+Очереди завершений (Completion Queue) и буферы размещаются в памяти хоста/устройства; Completions идут по PCIe как TLP (в Transaction Layer) и попадают в эти очереди, откуда драйвер читает результаты.
+\subsection{Posted и non-posted memory transactions}
+Итог: posted пишутся без ожидания Completion, non-posted (read/I-O/Config) завершаются получением Completion со статусом/данными.
+\subsubsection{Что такое Request и какие бывают}
+\begin{quote}
+``PM\_PME Messages are posted Transaction Layer Packets (TLPs) that inform the power management software which agent within the Hierarchy requests a PM state change.'' (\texttt{PCIe-5.0.md})
+\end{quote}
+\begin{quote}
+``since Non-Posted Requests are not considered complete until after the Completion returns, the Completion Status field gives the Requester an opportunity to “fix” the problem at some higher level protocol'' (\texttt{PCIe-5.0.md})
+\end{quote}
+Request — это TLP-запрос на Transaction Layer. Примеры posted Request: Memory Write, сообщения (например, PM\_PME) — у них нет Completion. Примеры non-posted Request: Memory Read, I/O, Config — они считаются завершёнными только после получения Completion с данными/статусом.
+\subsubsection{Что такое Memory/I-O/Config Requests}
+\begin{quote}
+``MRd 000001 0 0000 Memory Read Request … MRdLk 000001 0 0001 Memory Read Request-Locked'' (\texttt{PCIe-5.0.md})
+\end{quote}
+\begin{quote}
+``TLP Type Fmt [2:0](b) Type [4:0] (b) Description … MWr 010011 0 0000 Memory Write Request … IORd 000 0 0010 I/O Read Request … IOWr 010 0 0010 I/O Write Request … CfgRd0 000 0 0100 Configuration Read Type 0 … CfgWr0 010 0 0100 Configuration Write Type 0 … CfgRd1 000 0 0101 Configuration Read Type 1 … CfgWr1 010 0 0101 Configuration Write Type 1'' (\texttt{PCIe-5.0.md})
+\end{quote}
+\begin{quote}
+``An RC must support generation of configuration requests as a Requester. … An RC is permitted to support the generation of I/O Requests as a Requester.'' (\texttt{PCIe-5.0.md})
+\end{quote}
+Memory Requests работают с адресным пространством памяти (MMIO — Memory-Mapped I/O), куда отображены регистры устройств и буферы; это основной способ доступа к данным и к регистрам MMIO. I/O Requests обращаются к пространству портов ввода-вывода (legacy I/O space в x86), типичные операции — IORd/IOWr. Config Requests обращаются к конфигурационному пространству устройств (идентификаторы, BAR, capability/ACS/TPH и др.), типы CfgRd/CfgWr. I/O и Config — non-posted (нужен Completion с данными/статусом), Memory Write — posted (без Completion), Memory Read — non-posted (Completion с данными).
+\subsubsection{Сводная таблица типов Request и их posted/non-posted}
+\begin{center}
+\begin{tabular}{|p{3cm}|p{2.2cm}|p{6.2cm}|p{4.3cm}|}
+\hline
+Тип & Posted? & Цитата & Примечание \\
+\hline
+Memory Write (MWr) & posted & ``TLP Type Fmt [2:0](b) Type [4:0] (b) Description … MWr 010011 0 0000 Memory Write Request'' (\texttt{PCIe-5.0.md}) & Запись в память/буфер (MMIO или обычная память); Completion не требуется \\ \hline
+Memory Read (MRd) & non-posted & ``MRd 000001 0 0000 Memory Read Request … MRdLk 000001 0 0001 Memory Read Request-Locked'' (\texttt{PCIe-5.0.md}) & Чтение из памяти/буфера; Completion с данными завершает запрос \\ \hline
+I/O Read/Write (IORd/IOWr) & non-posted & ``TLP Type … IORd 000 0 0010 I/O Read Request … IOWr 010 0 0010 I/O Write Request'' (\texttt{PCIe-5.0.md}) & Доступ к портам I/O (legacy I/O space); требует Completion \\ \hline
+Config Read/Write (CfgRd/CfgWr) & non-posted & ``TLP Type … CfgRd0 000 0 0100 Configuration Read Type 0 … CfgWr0 010 0 0100 Configuration Write Type 0 … CfgRd1 000 0 0101 … CfgWr1 010 0 0101'' (\texttt{PCIe-5.0.md}) & Доступ к конфигурационному пространству PCI/PCIe; требует Completion \\ \hline
+Messages (например, PM\_PME) & posted & ``PM\_PME Messages are posted Transaction Layer Packets (TLPs) that inform the power management software which agent within the Hierarchy requests a PM state change.'' (\texttt{PCIe-5.0.md}) & Служебные сообщения; Completion не требуется \\ \hline
+\end{tabular}
+\end{center}
+Requests — это TLP на Transaction Layer; принадлежность к posted/non-posted закодирована типом TLP. Posted (MWr, Messages) не требуют Completion; non-posted (MRd, IORd/IOWr, CfgRd/CfgWr) завершаются Completion с данными/статусом.
+\subsubsection{Posted transactions}
+\begin{quote}
+``A Memory Read Request of 1 DW with no bytes enabled, or “zero-length Read,” may be used by devices as a type of flush Request. For a Requester, the flush semantic allows a device to ensure that previously issued Posted Writes have been completed at their PCI Express destination.'' (\texttt{PCIe-5.0.md})
+\end{quote}
+Posted Writes отправляются без явного Completion; при необходимости подтверждения используют zero-length Read как flush, чтобы убедиться в завершении ранее выданных posted операций.
+\subsubsection{Non-posted (Completion) операции}
+\begin{quote}
+``since Non-Posted Requests are not considered complete until after the Completion returns, the Completion Status field gives the Requester an opportunity to “fix” the problem at some higher level protocol'' (\texttt{PCIe-5.0.md})
+\end{quote}
+Non-posted запросы требуют Completion в ответ; Completion завершает логический перенос данных и подтверждает выполнение запроса.
+\subsubsection{Как определяется posted/non-posted (поле Type TLP)}
+\begin{quote}
+``Transaction Layer Packet, TLP — A Packet generated in the Transaction Layer to convey a Request or Completion.'' (\texttt{PCIe-5.0.md})
+\end{quote}
+Принадлежность к posted/non-posted задаётся типом TLP (полем Type/Format): Memory Write — posted (нет Completion), Memory Read/I-O/Config — non-posted (требуют Completion). Физический линк общий; различие закодировано в формате TLP, а не в отдельных «линиях/флагах».
+\subsection{Влияние ordering rules и ACS на posted/non-posted}
+Итог:  атрибуты упорядочивания (Relaxed/ID-
+Based Ordering, RO/IDO) и сервисы ACS (Access Control Services) могут разрешать обход posted TLP запросами/Completion, ослабляя порядок доставки и требуя учёта reordering.
+\subsubsection{Relaxed/ID-Based Ordering атрибуты}
+\begin{quote}
+``An NPR with Data must not pass a Posted Request unless C2b applies. … RO is an abbreviation for the Relaxed Ordering Attribute field. … An NPR with Data and with RO Set is permitted to pass Posted Requests.'' (\texttt{PCIe-5.0.md})
+\end{quote}
+Дополнительно про обход Posted:
+\begin{quote}
+``A Read Request must not pass a Posted Request unless B2b applies. … A Read Request with IDO Set is permitted to pass a Posted Request if the two Requester IDs are different or if both Requests contain a PASID TLP Prefix and the two PASID values are different. … An NPR with Data must not pass a Posted Request unless C2b applies.'' (\texttt{PCIe-5.0.md})
+\end{quote}
+Атрибуты Relaxed/ID-Based ослабляют требования упорядочивания TLP: по умолчанию Non-Posted Request не может обходить Posted, но с RO/IDO флагами это разрешено — TLP с RO/IDO могут пройти вперёд в очереди передачи/обработки, меняя порядок доставки по сравнению со строгим. Используется для снижения задержек и оптимизации маршрутизации, но требует учёта возможного reordering в драйверах/RC.
+\subsubsection{Access Control Services (ACS)}
+\begin{quote}
+``When ACS P2P Request Redirect is enabled, some or all peer-to-peer Requests are redirected, which can cause ordering rule violations in some cases. This section explores those cases, plus a similar case that occurs with RCs that implement “Request Retargeting” as an alternative mechanism for enforcing peer-to-peer access control.'' (\texttt{PCIe-5.0.md})
+\end{quote}
+\begin{quote}
+``When a peer-to-peer Posted Request is redirected, a subsequent peer-to-peer non-RO Completion that is routed directly can effectively pass the redirected Posted Request, violating the ordering rule that non-RO Completions must not pass Posted Requests. … ACS P2P Completion Redirect can be used to avoid violating this ordering rule.'' (\texttt{PCIe-5.0.md})
+\end{quote}
+\begin{quote}
+``When some peer-to-peer Requests are redirected but other peer-to-peer Requests are routed directly, the possibility exists of violating the ordering rules where Non-posted Requests or non-RO Posted Requests must not pass Posted Requests. … These ordering rule violation possibilities exist only when ACS P2P Request Redirect and ACS Direct Translated P2P are both enabled.'' (\texttt{PCIe-5.0.md})
+\end{quote}
+ACS (Access Control Services) управляет редиректом peer-to-peer TLP и влияет на правила упорядочивания: перенаправляя Requests/Completions, может нарушить запреты на обход posted, поэтому включает механизмы Completion Redirect и требует настройки, чтобы избежать нарушений и лишних задержек.
+\subsubsection{Completions проходящие posted}
+\begin{quote}
+``A Completion must not pass a Posted Request unless D2b applies. … A Completion with RO Set is permitted to pass a Posted Request. A Completion with IDO Set is permitted to pass a Posted Request if the Completer ID of the Completion is different from the Requester ID of the Posted Request.'' (\texttt{PCIe-5.0.md})
+\end{quote}
+Completions обычно не проходят мимо Posted, но с RO/IDO могут обходить, если соблюдены условия (другой Requester/Completer, флаги). Это меняет фактический порядок доставки и требует от системного ПО учитывать возможный reordering.
+\subsubsection{Requests проходящие posted}
+\begin{quote}
+``A Read Request must not pass a Posted Request unless B2b applies. … A Read Request with IDO Set is permitted to pass a Posted Request if the two Requester IDs are different or if both Requests contain a PASID TLP Prefix and the two PASID values are different. … An NPR with Data and with RO Set is permitted to pass Posted Requests.'' (\texttt{PCIe-5.0.md})
+\end{quote}
+Non-posted/Read запросы могут обходить posted при RO/IDO и разнице Requester ID/PASID. Это снижает задержки, но ослабляет строгий порядок, поэтому драйверы/RC должны учитывать возможный reordering и использовать барьеры там, где требуется строгая последовательность.
+\subsection{Что используется для чего в PCI}
+Итог: posted применяют для односторонних записей, non-posted для операций, где нужен ответ (read/I-O/Config); Completions завершает non-posted, ordering/ACS задаёт, как они могут обходить друг друга.
+\subsubsection{Posted (Memory Write)}
+\begin{quote}
+``A Memory Read Request of 1 DW with no bytes enabled, or “zero-length Read,” may be used by devices as a type of flush Request. For a Requester, the flush semantic allows a device to ensure that previously issued Posted Writes have been completed at their PCI Express destination.'' (\texttt{PCIe-5.0.md})
+\end{quote}
+Posted Writes идут без Completion; при необходимости подтверждения используют zero-length Read как flush, чтобы гарантировать завершение записи.
+
+\subsubsection{Non-posted (Memory Read/I-O/Config)}
+\begin{quote}
+``since Non-Posted Requests are not considered complete until after the Completion returns, the Completion Status field gives the Requester an opportunity to “fix” the problem at some higher level protocol'' (\texttt{PCIe-5.0.md})
+\end{quote}
+Non-posted запросы требуют Completion (с данными/статусом); это позволяет получать результат чтения и узнавать о статусе I/O/Config операций.
+
+\subsubsection{Completions и упорядочивание}
+\begin{quote}
+``A Completion must not pass a Posted Request unless D2b applies. … A Completion with RO Set is permitted to pass a Posted Request. A Completion with IDO Set is permitted to pass a Posted Request if the Completer ID of the Completion is different from the Requester ID of the Posted Request.'' (\texttt{PCIe-5.0.md})
+\end{quote}
+Completions могут обходить posted при RO/IDO и разных ID; драйверам нужно учитывать возможный reordering.
+
+\end{document}
+

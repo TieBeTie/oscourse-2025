@@ -1,0 +1,461 @@
+\documentclass[a4paper,12pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[russian]{babel}
+\usepackage{geometry}
+\usepackage{hyperref}
+\geometry{margin=2.5cm}
+\setcounter{secnumdepth}{3}
+\setcounter{tocdepth}{3}
+\title{Лабораторная работа №5: отчёт (структура)}
+\author{}
+\date{}
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+
+\section{Таймеры: init, HPET, прерывания}
+
+
+\subsection{Выбор таймера в timers\_init}
+\begin{quote}
+``Выбор таймера производится с помощью функции timers\_init в init.c. После выполнения задания убедитесь, что операционная система корректно работает со всеми таймерами, поддерживающими планировщик задач: hpet0, hpet1, rtc.'' (Текст задания ЛР5)
+\end{quote}
+В задании указано, что планировщик должен работать с hpet0, hpet1 и rtc; по этой причине timers\_init выбирает один из трёх таймеров, и после настройки прерываний проверяется корректность работы планировщика для каждого варианта.
+\begin{quote}\begin{verbatim}
+void timers_init(void) {
+    timertab[0] = timer_rtc;
+    timertab[1] = timer_pit;
+    timertab[2] = timer_acpipm;
+    timertab[3] = timer_hpet0;
+    timertab[4] = timer_hpet1;
+    for (int i = 0; i < MAX_TIMERS; i++) {
+        if (timertab[i].timer_init) {
+            timertab[i].timer_init();
+            if (trace_init) cprintf("Initialized timer %s\n", timertab[i].timer_name);
+        }
+    }
+}
+
+void timers_schedule(const char *name) {
+    for (int i = 0; i < MAX_TIMERS; i++) {
+        if (timertab[i].timer_name && !strcmp(timertab[i].timer_name, name)) {
+            if (!timertab[i].enable_interrupts) panic("Timer %s does not support interrupts\n", name);
+            timer_for_schedule = &timertab[i];
+            timertab[i].enable_interrupts();
+            return;
+        }
+    }
+    panic("Timer %s does not exist\n", name);
+}
+\end{verbatim}\end{quote}
+Код timers\_init из init.c инициализирует все доступные таймеры (rtc, pit, pm, hpet0, hpet1), а timers\_schedule по имени выбирает таймер для планировщика, проверяет поддержку прерываний и вызывает его enable\_interrupts — этим выполняется требование задания о работе планировщика с hpet0/hpet1/rtc.
+
+
+
+\subsection{Настройка таймеров hpet0 и hpet1 (LegacyReplacement)}
+\begin{quote}
+``The HPET Description Table is a means to report the Base Addresses of each Event Timer Block early in the OS boot process... The table signature is "HPET"... The Base Address field describes the location of the Event Timer Block in memory mapped I/O space.'' (HPET Spec, sec. 3.2.4)
+\end{quote}
+\begin{quote}
+``Для простоты реализации поддержки HPET предлагается использовать режим LegacyReplacement, который задействует прерывания на линиях 0 и 8 для hpet0 и hpet1 соответственно.'' (Текст задания ЛР5)
+\end{quote}
+\begin{quote}
+``If the Legacy Replacement Route bit (LEG\_RT\_CNF) is set (‘1’), the following mapping is forced: [Timer 0 → IRQ0/IRQ2, Timer 1 → IRQ8].'' (\texttt{hpet.md}, sec. 2.4.2.1)
+\end{quote}
+В спецификации указано, что базовый адрес HPET берётся из таблицы HPET, а в задании — что нужен режим LegacyReplacement с IRQ0/IRQ8; поэтому \texttt{hpet\_enable\_interrupts\_tim0}/\texttt{hpet\_enable\_interrupts\_tim1} читают адрес из таблицы, включают LegacyReplacement (\texttt{LEG\_RT\_CNF}) и настраивают таймер0 на IRQ0 (0.5с) и таймер1 на IRQ8 (1.5с).
+\begin{quote}\begin{verbatim}
+void hpet_init() {
+    if (hpetReg == NULL) {
+        nmi_disable();
+        hpetReg = hpet_register();
+        uint64_t cap = hpetReg->GCAP_ID;
+        hpetFemto = (uintptr_t)(cap >> 32);
+        if (!(cap & HPET_LEG_RT_CAP)) panic("HPET has no LegacyReplacement mode");
+        hpetFreq = (1 * Peta) / hpetFemto;
+        hpetReg->GEN_CONF |= HPET_ENABLE_CNF;
+        nmi_enable();
+    }
+}
+\end{verbatim}\end{quote}
+По HPET Spec 2.3.4 поля GCAP\_ID содержат COUNTER\_CLK\_PERIOD (частота main counter) и LEG\_RT\_CAP (поддержка LegacyReplacement); поэтому в hpet\_init читается GCAP\_ID, вычисляется частота, проверяется поддержка LegacyReplacement и выставляется ENABLE\_CNF для запуска счётчика.
+\begin{quote}\begin{verbatim}
+void hpet_enable_interrupts_tim0(void) {
+    hpet_init();
+    hpetReg->GEN_CONF &= ~HPET_ENABLE_CNF;
+    hpetReg->GEN_CONF |= HPET_LEG_RT_CNF;
+    uint64_t conf = hpetReg->TIM0_CONF;
+    conf |= HPET_TN_INT_ENB_CNF;
+    conf |= HPET_TN_TYPE_CNF;
+    conf |= HPET_TN_VAL_SET_CNF;
+    hpetReg->TIM0_CONF = conf;
+    uint64_t delta = hpetFreq / 2;
+    hpetReg->MAIN_CNT = 0;
+    hpetReg->TIM0_COMP = delta;
+    hpetReg->GEN_CONF |= HPET_ENABLE_CNF;
+    pic_irq_unmask(IRQ_TIMER);
+}
+
+void hpet_enable_interrupts_tim1(void) {
+    hpet_init();
+    hpetReg->GEN_CONF &= ~HPET_ENABLE_CNF;
+    uint64_t conf = hpetReg->TIM1_CONF;
+    conf |= HPET_TN_INT_ENB_CNF;
+    conf |= HPET_TN_TYPE_CNF;
+    conf |= HPET_TN_VAL_SET_CNF;
+    hpetReg->TIM1_CONF = conf;
+    uint64_t delta = (hpetFreq * 3) / 2;
+    hpetReg->MAIN_CNT = 0;
+    hpetReg->TIM1_COMP = delta;
+    hpetReg->GEN_CONF |= HPET_ENABLE_CNF;
+    pic_irq_unmask(IRQ_CLOCK);
+}
+\end{verbatim}\end{quote}
+\texttt{LEG\_RT\_CNF} задаёт принудительную маршрутизацию (цитата выше), поэтому в \texttt{hpet\_enable\_interrupts\_tim0/1} включаем LegacyReplacement, ставим \texttt{INT\_ENB}/\texttt{TYPE}/\texttt{VAL\_SET} и загружаем компаратор на 0.5с/1.5с от частоты HPET, затем размаскируем соответствующий IRQ в PIC.
+Полные функции для LegacyReplacement: таймер0 на IRQ0 с периодом 0.5с, таймер1 на IRQ8 с периодом 1.5с.
+
+
+
+\subsection{Обработка прерываний HPET}
+\begin{quote}
+``Замените код обработки сигнала EOI в файле trap.c на использование функции handle_interrupts из структуры timer_for_schedule. Добавьте код обработки прерывания таймера в trap_init аналогично с прерыванием часов.'' (Текст задания ЛР5)
+\end{quote}
+Требование задания — обрабатывать таймер через timer\_for\_schedule; поэтому в IDT добавлен IRQ\_TIMER, а в trap\_dispatch оба IRQ (HPET/PIT и RTC) направляются на timer\_for\_schedule->handle\_interrupts(), чтобы единообразно обслуживать выбранный таймер и затем вызвать планировщик.
+\begin{quote}\begin{verbatim}
+/* trap_init */
+extern void timer_thdlr(void);
+idt[IRQ_OFFSET + IRQ_TIMER] = GATE(0, GD_KT, timer_thdlr, 0);
+
+/* trap_dispatch */
+case IRQ_OFFSET + IRQ_TIMER:
+case IRQ_OFFSET + IRQ_CLOCK:
+    timer_for_schedule->handle_interrupts();
+    sched_yield();
+    return;
+\end{verbatim}\end{quote}
+Добавлен обработчик IRQ\_TIMER в IDT; оба IRQ (HPET/PIT и RTC) проходят через timer\_for\_schedule, затем вызывается планировщик.
+
+
+
+\subsection{Поиск таблиц ACPI (RSDP, FADT/FACP, HPET)}
+
+\begin{quote}
+``The RSDP structure … contains pointers to either RSDT (32-bit) or XSDT (64-bit)… An ACPI-compatible OS must use the XSDT if present.'' (ACPI\_6.6.md)
+\end{quote}
+RSDP хранит адреса XSDT/RSDT, XSDT обязателен при \texttt{Revision >= 2}.
+\begin{quote}\begin{verbatim}
+RSDP *get_rsdp(void) {
+    physaddr_t pa = uefi_lp->ACPIRoot;
+    return mmio_map_region(pa, sizeof(RSDP));
+}
+static void *find_acpi_table(const char *sign) {
+    RSDP *rsdp = get_rsdp();
+    if (strncmp(rsdp->Signature, "RSD PTR ", sizeof rsdp->Signature) != 0) return NULL;
+    XSDT *xsdt = NULL; RSDT *rsdt = NULL;
+    if (rsdp->Revision >= 2 && rsdp->XsdtAddress) {
+        physaddr_t pa = rsdp->XsdtAddress;
+        xsdt = mmio_map_region(pa, sizeof(ACPISDTHeader));
+        xsdt = mmio_remap_last_region(pa, xsdt, sizeof(ACPISDTHeader), xsdt->h.Length);
+    }
+    if (rsdp->RsdtAddress) {
+        physaddr_t pa = rsdp->RsdtAddress;
+        rsdt = mmio_map_region(pa, sizeof(ACPISDTHeader));
+        rsdt = mmio_remap_last_region(pa, rsdt, sizeof(ACPISDTHeader), rsdt->h.Length);
+    }
+\end{verbatim}\end{quote}
+Проверяем сигнатуру \texttt{"RSD PTR "} и берём XSDT (или RSDT для совместимости), как требует спецификация.
+
+\begin{quote}
+``XSDT contains an array of 64-bit physical addresses … OSPM … can further address the table based upon its Length field.'' (ACPI\_6.6.md)
+\end{quote}
+Перебираем XSDT: сигнатура, ремап по длине, проверка checksum.
+\begin{quote}\begin{verbatim}
+    if (xsdt) {
+        size_t count = (xsdt->h.Length - sizeof(ACPISDTHeader)) / sizeof(uint64_t);
+        uint64_t *ents = (uint64_t *)((uint8_t *)xsdt + sizeof(ACPISDTHeader));
+        for (size_t i = 0; i < count; i++) {
+            physaddr_t pa = ents[i];
+            ACPISDTHeader *h = mmio_map_region(pa, sizeof(ACPISDTHeader));
+            if (strncmp(h->Signature, sign, 4) != 0) continue;
+            h = mmio_remap_last_region(pa, h, sizeof(ACPISDTHeader), h->Length);
+            uint8_t sum = 0; uint8_t *p = (uint8_t *)h;
+            for (size_t j = 0; j < h->Length; j++) sum += p[j];
+            if (sum != 0) continue;
+            return h;
+        }
+    }
+\end{verbatim}\end{quote}
+
+\begin{quote}
+``RSDT contains an array of 32-bit physical addresses … Used for backward compatibility with ACPI 1.0 systems.'' (ACPI\_6.6.md)
+\end{quote}
+Аналогичная проверка для RSDT: 32-битные записи, сигнатура, checksum.
+\begin{quote}\begin{verbatim}
+    if (rsdt) {
+        size_t count = (rsdt->h.Length - sizeof(ACPISDTHeader)) / sizeof(uint32_t);
+        uint32_t *ents = (uint32_t *)((uint8_t *)rsdt + sizeof(ACPISDTHeader));
+        for (size_t i = 0; i < count; i++) {
+            physaddr_t pa = ents[i];
+            ACPISDTHeader *h = mmio_map_region(pa, sizeof(ACPISDTHeader));
+            if (strncmp(h->Signature, sign, 4) != 0) continue;
+            h = mmio_remap_last_region(pa, h, sizeof(ACPISDTHeader), h->Length);
+            uint8_t sum = 0; uint8_t *p = (uint8_t *)h;
+            for (size_t j = 0; j < h->Length; j++) sum += p[j];
+            if (sum != 0) continue;
+            return h;
+        }
+    }
+    return NULL;
+}
+\end{verbatim}\end{quote}
+
+\begin{quote}
+``FADT … signature is "FACP" (not "FADT").'' (ACPI\_6.6.md)
+\end{quote}
+Сигнатура FADT — \texttt{"FACP"}, поэтому ищем её, иначе panic.
+\begin{quote}\begin{verbatim}
+FADT *get_fadt(void) {
+    FADT *fadt = (FADT *)find_acpi_table("FACP");
+    if (!fadt) panic("FADT (FACP) table not found\n");
+    return fadt;
+}
+\end{verbatim}\end{quote}
+
+\begin{quote}
+``HPET Description Table … signature "HPET" … contains the base address of the HPET register block.'' (HPET Spec, sec. 3.2.4)
+\end{quote}
+Таблица HPET нужна, чтобы узнать базовый адрес регистров HPET.
+\begin{quote}\begin{verbatim}
+HPET *get_hpet(void) {
+    HPET *hpet = (HPET *)find_acpi_table("HPET");
+    if (!hpet) panic("HPET table not found\n");
+    return hpet;
+}
+\end{verbatim}\end{quote}
+
+
+\section{Синхронизация между процессами (spinlock)}
+\subsection{Спинлоки в test\_alloc / test\_free}
+\begin{quote}
+``Необходимо добавить в функции test_alloc и test_free (файл alloc.c) защиту блокировками (функции spin_lock, spin_unlock) таким образом, чтобы функции выделения и освобождения памяти не могли работать со списком страниц одновременно.'' (Текст задания ЛР5)
+\end{quote}
+В задании прямо сказано защитить test\_alloc/test\_free блокировками; поэтому весь критический участок обёрнут spin\_lock/spin\_unlock, чтобы параллельные вызовы не повреждали список свободных блоков.
+\begin{quote}\begin{verbatim}
+static struct spinlock alloc_lock;
+
+void *test_alloc(uint8_t nbytes) {
+    spin_lock(&alloc_lock);
+    size_t nunits = (nbytes + sizeof(Header) - 1) / sizeof(Header) + 1;
+    Header *prevp = freep;
+    for (Header *p = prevp->next;; prevp = p, p = p->next) {
+        if (p->size >= nunits) {
+            if (p->size == nunits) {
+                prevp->next = p->next;
+                p->next->prev = prevp;
+            } else {
+                p += p->size - nunits;
+                p->next = prevp->next;
+                p->prev = prevp;
+                p->next->prev = p;
+                prevp->next = p;
+                p += p->size;
+                p->size = nunits;
+            }
+            void *res = (void *)(p + 1);
+            spin_unlock(&alloc_lock);
+            return res;
+        }
+        if (p == freep) {
+            spin_unlock(&alloc_lock);
+            return NULL;
+        }
+    }
+}
+
+void test_free(void *ap) {
+    Header *bp = (Header *)ap - 1;
+    spin_lock(&alloc_lock);
+    Header *p = freep;
+    for (; !(bp > p && bp < p->next); p = p->next)
+        if (p >= p->next && (bp > p || bp < p->next))
+            break;
+    if (bp + bp->size == p->next) {
+        bp->size += p->next->size;
+        bp->next = p->next->next;
+        bp->next->prev = bp;
+    } else {
+        bp->next = p->next;
+        bp->next->prev = bp;
+    }
+    if (p + p->size == bp) {
+        p->size += bp->size;
+        p->next = bp->next;
+        p->next->prev = p;
+    } else {
+        p->next = bp;
+        p->next->prev = p;
+    }
+    freep = p;
+    check_list();
+    spin_unlock(&alloc_lock);
+}
+\end{verbatim}\end{quote}
+Полные версии test\_alloc/test\_free со спинлоком вокруг операций со списком.
+
+\subsection{Проверка целостности списка свободных страниц}
+\begin{quote}
+``Ошибка повреждения списочной структуры хранения блоков свободной памяти проявляет себя нерегулярно. Уменьшив интервал срабатываний таймера, можно увеличить вероятность ее возникновения. При возникновении ошибки на экран выводится строка вида: kernel panic at kern/alloc.c:20: Corrupted list.'' (Текст задания ЛР5)
+\end{quote}
+Задание говорит, что ошибка редкая и связана с гонкой на списке свободных блоков; поэтому (1) мы защитили список спинлоком выше, а (2) для проверки уменьшаем период таймера, чтобы чаще переключать задачи и повысить вероятность столкновения без блокировки, выявляя повреждение списка.
+
+\section{Time Stamp Counter (TSC)}
+\subsection{Секундомер: \texttt{timer\_start} / \texttt{timer\_stop} / \texttt{timer\_cpu\_frequency}}
+\begin{quote}
+``The processor monotonically increments the time-stamp counter MSR every clock cycle and resets it to 0 whenever the processor is reset.'' (\texttt{Intel-SDM.md})
+\end{quote}
+\begin{quote}
+``Функции timer_start и timer_cpu_frequency принимают в качестве аргумента название таймера (hpet0, hpet1, pit, pm)... Если функция timer_stop была вызвана после timer_start, она должна выводить на экран время в секундах между этими вызовами. В случае вызова timer_stop без предварительного вызова timer_start должна выводиться ошибка.'' (Текст задания ЛР5)
+\end{quote}
+Раз задание требует выбрать опорный таймер и выводить время между start/stop, \texttt{timer\_start} сначала выбирает таймер (pit/hpet0/hpet1/pm) и фиксирует TSC и его частоту, \texttt{timer\_stop} берёт дельту TSC и делит на выбранную частоту (или выдаёт ошибку без start), а \texttt{timer\_cpu\_frequency} печатает частоту по имени таймера.
+\begin{quote}\begin{verbatim}
+static bool timer_started = 0;
+static uint64_t timer = 0;
+static uint64_t freq = 0;
+
+void timer_start(const char *name) {
+    if (!name) { print_timer_error(); return; }
+    uint64_t f = 0;
+    if (!strcmp(name, "pit")) {
+        f = tsc_calibrate();
+    } else if (!strcmp(name, "hpet0") || !strcmp(name, "hpet1")) {
+        f = hpet_cpu_frequency();
+    } else if (!strcmp(name, "pm")) {
+        f = pmtimer_cpu_frequency();
+    } else {
+        print_timer_error();
+        return;
+    }
+    freq = f;
+    timer = read_tsc();
+    timer_started = 1;
+}
+
+void timer_stop(void) {
+    if (!timer_started) { print_timer_error(); return; }
+    uint64_t now = read_tsc();
+    uint64_t delta = now - timer;
+    if (!freq) { print_timer_error(); return; }
+    unsigned seconds = (unsigned)(delta / freq);
+    print_time(seconds);
+    timer_started = 0;
+}
+
+void timer_cpu_frequency(const char *name) {
+    if (!name) { print_timer_error(); return; }
+    uint64_t f = 0;
+    if (!strcmp(name, "pit")) {
+        f = tsc_calibrate();
+    } else if (!strcmp(name, "hpet0") || !strcmp(name, "hpet1")) {
+        f = hpet_cpu_frequency();
+    } else if (!strcmp(name, "pm")) {
+        f = pmtimer_cpu_frequency();
+    } else {
+        print_timer_error();
+        return;
+    }
+    unsigned hz = (unsigned)f;
+    print_time(hz);
+}
+\end{verbatim}\end{quote}
+Полные реализации timer\_start/stop/frequency (выбор опорного таймера, чтение TSC, вывод результата).
+
+\subsection{Расчёт частоты CPU: \texttt{hpet\_cpu\_frequency} / \texttt{pmtimer\_cpu\_frequency}}
+\begin{quote}
+``The power management timer is a 24-bit or 32-bit fixed rate free running count-up timer that runs off a 3.579545 MHz clock. The ACPI OS checks the FADT to determine whether the PM Timer is a 32-bit or 24-bit timer.'' (\texttt{ACPI\_6.6.md})
+\end{quote}
+\begin{quote}
+``Для поддержки остальных таймеров также реализуйте схожим образом функции hpet_cpu_frequency и pmtimer_cpu_frequency.'' (Текст задания ЛР5)
+\end{quote}
+В спецификации PMTimer зафиксирована частота 3.579545 МГц и разрядность 24/32 бита; задание просит реализовать расчёт через HPET и PMTimer. Поэтому \texttt{hpet\_cpu\_frequency} берёт частоту из \texttt{COUNTER\_CLK\_PERIOD} (\texttt{GCAP\_ID}) и сравнивает дельту TSC с дельтой main counter, а \texttt{pmtimer\_cpu\_frequency} использует фиксированные 3.579545 МГц с учётом 24/32-битного переполнения. Прерывания временно запрещаем, чтобы чтения TSC и счётчиков были атомарными и не искажались задержками обработчиков.
+
+\begin{quote}\begin{verbatim}
+uint64_t hpet_cpu_frequency(void) {
+    static uint64_t cpu_freq;
+    if (!cpu_freq) {
+        hpet_init();
+        uint64_t interrupts_enabled = read_rflags() & FL_IF;
+        asm volatile("cli");
+        uint64_t c1 = hpet_get_main_cnt();
+        uint64_t t1 = read_tsc();
+        uint64_t threshold = hpetFreq / 10;
+        uint64_t c2;
+        do { c2 = hpet_get_main_cnt(); } while (c2 - c1 < threshold);
+        uint64_t t2 = read_tsc();
+        if (interrupts_enabled) asm volatile("sti");
+        uint64_t timer_delta = c2 - c1;
+        uint64_t tsc_delta = t2 - t1;
+        cpu_freq = (tsc_delta * hpetFreq) / timer_delta;
+    }
+    return cpu_freq;
+}
+
+uint64_t pmtimer_cpu_frequency(void) {
+    static uint64_t cpu_freq;
+    if (!cpu_freq) {
+        uint64_t interrupts_enabled = read_rflags() & FL_IF;
+        asm volatile("cli");
+        uint64_t t1 = pmtimer_get_timeval();
+        uint64_t tsc1 = read_tsc();
+        asm volatile("pause");
+        uint64_t t2 = pmtimer_get_timeval();
+        uint64_t tsc2 = read_tsc();
+        if (interrupts_enabled) asm volatile("sti");
+        uint64_t timer_delta = 0;
+        if (t2 > t1) {
+            timer_delta = t2 - t1;
+        } else if (t1 - t2 <= 0x00FFFFFF) {
+            timer_delta = 0x00FFFFFF - t1 + t2;
+        } else {
+            timer_delta = UINT32_MAX - t1 + t2;
+        }
+        uint64_t tsc_delta = (tsc2 > tsc1) ? (tsc2 - tsc1) : (ULONG_MAX - tsc1 + tsc2);
+        cpu_freq = (tsc_delta * PM_FREQ) / timer_delta;
+    }
+    return cpu_freq;
+}
+\end{verbatim}\end{quote}
+Полный код вычисления частоты CPU через HPET и PMTimer с отключением прерываний и учётом переполнений.
+
+\subsection{Команды монитора (оболочки для \texttt{timer\_start/stop/frequency})}
+\begin{quote}
+``Для проверки необходимо добавить команды монитора timer_start, timer_stop и timer_freq, которые будут вызывать функции timer_start, timer_stop и timer_cpu_frequency соответственно.'' (Текст задания ЛР5)
+\end{quote}
+Команды монитора — тонкая оболочка: они вызывают \texttt{timer\_start}/\texttt{timer\_stop}/\texttt{timer\_cpu\_frequency} с именем таймера и лишь проверяют, что аргумент указан. Основная логика измерения времени/частоты находится в подпункте «Секундомер: \texttt{timer\_start} / \texttt{timer\_stop} / \texttt{timer\_cpu\_frequency}».
+\begin{quote}\begin{verbatim}
+int mon_start(int argc, char **argv, struct Trapframe *tf) {
+    (void)tf;
+    if (argc < 2) { print_timer_error(); return 0; }
+    timer_start(argv[1]);
+    return 0;
+}
+int mon_stop(int argc, char **argv, struct Trapframe *tf) {
+    (void)argc; (void)argv; (void)tf;
+    timer_stop();
+    return 0;
+}
+int mon_frequency(int argc, char **argv, struct Trapframe *tf) {
+    (void)tf;
+    if (argc < 2) { print_timer_error(); return 0; }
+    timer_cpu_frequency(argv[1]);
+    return 0;
+}
+\end{verbatim}\end{quote}
+Полные реализации команд монитора, вызывающих функции секундомера.
+
+\section{Примечания по проверке}
+\subsection{Замечания по VirtualBox и PIT}
+Если tsc\_calibrate (PIT) зависает в VirtualBox, использовать hpet0/hpet1 или pm как опорные таймеры.
+
+\end{document}
+

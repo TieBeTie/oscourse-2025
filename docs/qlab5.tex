@@ -1,0 +1,162 @@
+\documentclass[a4paper,12pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[russian]{babel}
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+\title{Лабораторная работа №5: ответы с цитатами из спецификаций}
+\author{}
+\date{}
+\begin{document}
+\maketitle
+
+\section*{Вопрос 1. Точность и частота Time Stamp Counter}
+\textbf{Что такое TSC (Time Stamp Counter).} 
+\begin{quote}
+``The processor monotonically increments the time-stamp counter MSR every clock cycle and resets it to 0 whenever the processor is reset.'' (\texttt{specifications/Intel-SDM.md}, 132064--132066)
+\end{quote}
+TSC (счётчик отметок времени) — аппаратный 64-битный счётчик тактов, идущий каждый цикл и сбрасываемый при аппаратном сбросе.
+
+\textbf{От чего зависит точность вычисления частоты TSC.} 
+\begin{quote}
+``EBX[31:0]/EAX[31:0] indicates the ratio of the TSC frequency and the core crystal clock frequency... `TSC frequency` = `core crystal clock frequency` * EBX/EAX.'' (\texttt{Intel-SDM.md})
+\end{quote}
+Точность зависит от наличия аппаратно объявленного отношения TSC к опорному кристаллу через CPUID лист 0x15: при наличии числителя и знаменателя частота определяется точно; при отсутствии — требуется внешняя калибровка.
+
+\textbf{Как определяется и используется базовая частота (общий источник для разных ядер).} 
+\begin{quote}
+``The core crystal clock may differ from the reference clock, bus clock, or core clock frequencies.'' (\texttt{Intel-SDM.md})
+\end{quote}
+Опорный core crystal clock — единый эталон для пакета; отношение к нему задаёт частоту TSC одинаково для всех ядер, что обеспечивает согласованность счётчиков при наличии инвариантности.
+
+\textbf{Что представляет собой частота TSC и является ли она переменной.} 
+\begin{quote}
+``Bit 08: Invariant TSC available if 1.'' (\texttt{Intel-SDM.md})
+\end{quote}
+При установленном признаке Invariant TSC частота фиксирована и не меняется при P-состояниях и переходах сна; без этого признака частота может следовать за частотой ядра, делая расчёт переменным.
+
+\textbf{Как связаны TSC на разных ядрах.} Спецификация не даёт численной нормы синхронизации; при наличии Invariant TSC предполагается общий стабильный источник тактов для всех ядер, но реальный разброс и возможные смещения в виртуализации зависят от реализации.
+
+\textbf{Для чего используется TSC в современных системах.} 
+\begin{quote}
+``The invariant TSC will run at a constant rate in all ACPI P-, C-. and T-states... On processors with invariant TSC support, the OS may use the TSC for wall clock timer services (instead of ACPI or HPET timers). TSC reads are much more efficient and do not incur the overhead associated with a ring transition or access to a platform resource.'' (\texttt{Intel-SDM.md})
+\end{quote}
+TSC служит высокоточным, недорогим по обращению источником времени; при инвариантности его можно использовать как системный таймер для отметок времени, профилирования и отсчёта производительности без переходов кольца и доступа к внешним таймерам.
+
+\textbf{Что нужно, чтобы с помощью TSC измерять производительность кода.} 
+\begin{quote}
+``Time Stamp Disable (bit 2 of CR4) — Restricts the execution of the RDTSC instruction to procedures running at privilege level 0 when set; allows RDTSC instruction to be executed at any privilege level when clear.'' (\texttt{Intel-SDM.md})
+\end{quote}
+\begin{quote}
+``The RDTSC instruction is not a serializing instruction... If software requires RDTSC to be executed only after all previous instructions have executed and all previous loads are globally visible, it can execute LFENCE immediately before RDTSC... MFENCE;LFENCE immediately before RDTSC... LFENCE immediately after RDTSC.'' (\texttt{Intel-SDM.md})
+\end{quote}
+Нужно: доступ к RDTSC (бит CR4.TSD сброшен), ограждение чтений барьерами LFENCE/MFENCE для корректного порядка, знание точной частоты (через CPUID 0x15), закрепление или учёт миграций между ядрами, чтобы интерпретировать разницу TSC как время.
+
+\section*{Вопрос 2. ACPI и DeviceTree}
+\textbf{Что такое ACPI и откуда берутся его структуры данных.}
+\begin{quote}
+``ACPI can first be understood as an architecture-independent power management and configuration framework that forms a subsystem within the host OS. This framework establishes a hardware register set to define power states (sleep, hibernate, wake, etc)... The primary intention of the standard ACPI framework and the hardware register set is to enable power management and system configuration without directly calling firmware natively from the OS.'' (\texttt{ACPI\_6.6.md})
+\end{quote}
+\begin{quote}
+``The system firmware then uses information obtained during firmware initialization to update the ACPI tables as necessary with various platform configurations and power interface data, before passing control to the bootstrap loader. The extended root system description table (XSDT) is the first table used by the ACPI subsystem and contains the addresses...'' (\texttt{ACPI\_6.6.md})
+\end{quote}
+ACPI — это каркас управления питанием и конфигурацией, встроенный в операционную систему; таблицы ACPI формирует системная прошивка при инициализации и передаёт их ОС через XSDT/RSDT.
+
+\textbf{Как выглядят структуры данных ACPI.}
+\begin{quote}
+``The extended root system description table (XSDT) is the first table used by the ACPI subsystem and contains the addresses...'' (\texttt{ACPI\_6.6.md})
+\end{quote}
+XSDT/RSDT — таблица-список адресов на другие таблицы; каждая таблица имеет общий DESCRIPTION\_HEADER с сигнатурой и длиной и далее тело (например FADT, DSDT, SSDT), где находятся описания устройств, ресурсов и методы AML.
+
+\textbf{Root System Description Pointer (RSDP) и зачем он нужен.}
+\begin{quote}
+``Root System Description Pointer (RSDP)'' (\texttt{ACPI\_6.6.md})
+\end{quote}
+RSDP — корневой указатель, по которому ОС находит XSDT/RSDT и далее все остальные таблицы ACPI; без него стек таблиц недоступен.
+
+\textbf{Откуда берутся структуры данных ACPI.} 
+\begin{quote}
+``The system firmware then uses information obtained during firmware initialization to update the ACPI tables as necessary with various platform configurations and power interface data, before passing control to the bootstrap loader.'' (\texttt{ACPI\_6.6.md})
+\end{quote}
+Таблицы ACPI формируются системной прошивкой (обычно UEFI) на этапе инициализации и передаются загрузчику; внутри находятся исполняемые методы AML и описания устройств/питания.
+
+\textbf{Откуда берутся структуры данных DeviceTree.} 
+\begin{quote}
+``The DTB must be contained in memory of type EfiACPIReclaimMemory... Firmware must have the DTB resident in memory and installed in the EFI system table before executing any UEFI applications or drivers... Once the DTB is installed as a configuration table, the system firmware must not make any modification to it or reference any data contained within the DTB.'' (\texttt{UEFI-2.11.md})
+\end{quote}
+Devicetree (DTB, Flattened Devicetree Blob) кладётся прошивкой в память и публикуется через системную таблицу; после публикации прошивка его не меняет.
+
+\textbf{Как выглядит структура данных DeviceTree.}
+\begin{quote}
+``Devicetree table, in Flattened Devicetree Blob (DTB) format'' (\texttt{UEFI-2.11.md})
+\end{quote}
+DTB — плоский бинарный блоб с древовидными узлами и свойствами, упакованными в один файл; прошивка только размещает его в памяти и не модифицирует.
+
+\textbf{Чем похожи и чем отличаются.} Оба описывают аппаратную платформу для операционной системы без жёсткого кодирования в ядре. ACPI несёт исполняемые методы AML и создаётся динамически прошивкой; Devicetree — статическое древо свойств устройств без исполняемого кода, подготовленное заранее и только размещаемое прошивкой.
+
+\noindent\textbf{Сравнение ACPI и DeviceTree (таблица с цитатами)}\\[4pt]
+\begin{tabular}{|p{2.6cm}|p{4.6cm}|p{4.6cm}|p{3cm}|}
+\hline
+Критерий & ACPI (цитата) & DeviceTree (цитата) & Отличие (кратко) \\
+\hline
+Источник / кто размещает & ``The system firmware then uses information obtained during firmware initialization to update the ACPI tables as necessary with various platform configurations and power interface data, before passing control to the bootstrap loader.'' (\texttt{ACPI\_6.6.md}) & ``Firmware must have the DTB resident in memory and installed in the EFI system table before executing any UEFI applications or drivers... Once the DTB is installed as a configuration table, the system firmware must not make any modification to it...'' (\texttt{UEFI-2.11.md}) & Обе загружаются прошивкой; ACPI таблицы прошивка наполняет и обновляет, DTB прошивка лишь кладёт и не правит. \\
+\hline
+Формат структуры & ``The extended root system description table (XSDT) is the first table used by the ACPI subsystem and contains the addresses...'' (\texttt{ACPI\_6.6.md}) & ``Devicetree table, in Flattened Devicetree Blob (DTB) format'' (\texttt{UEFI-2.11.md}) & ACPI — набор таблиц с заголовками и методами AML; DeviceTree — один плоский блоб с деревом узлов/свойств. \\
+\hline
+Изменяемость / использование ОС & ``ACPI can first be understood as an architecture-independent power management and configuration framework that forms a subsystem within the host OS...'' (\texttt{ACPI\_6.6.md}) & ``Once the DTB is installed as a configuration table, the system firmware must not make any modification to it or reference any data contained within the DTB. UEFI applications are permitted to modify or replace the loaded DTB.'' (\texttt{UEFI-2.11.md}) & ACPI активно интерпретируется ОС (AML); DTB статичен, может быть заменён загрузчиком/UEFI приложением, но не исполняется. \\
+\hline
+\end{tabular}
+
+\section*{Вопрос 3. Управление питанием в ACPI (S3, S4, S0ix)}
+\textbf{1. Что такое управление питанием в ACPI?} 
+\begin{quote}
+``ACPI can first be understood as an architecture-independent power management and configuration framework that forms a subsystem within the host OS. This framework establishes a hardware register set to define power states (sleep, hibernate, wake, etc)...'' (\texttt{ACPI\_6.6.md})
+\end{quote}
+Ответ: ACPI — каркас управления питанием и конфигурацией; он задаёт регистры и таблицы, через которые ОС переводит систему в состояния сна/пробуждения без прямых вызовов прошивки.
+
+\textbf{2. Какие режимы работы (S-состояния) определены?} 
+\begin{quote}
+``The S1 sleeping state is a low wake latency sleeping state. In this state, no system context is lost (CPU or chip set) and hardware maintains all system context.'' (\texttt{ACPI\_6.6.md}) \\
+``The S3 sleeping state is a low wake latency sleeping state where all system context is lost except system memory.'' (\texttt{ACPI\_6.6.md}) \\
+``The S4 sleeping state is the lowest power, longest wake latency sleeping state supported by ACPI.'' (\texttt{ACPI\_6.6.md})
+\end{quote}
+Ответ: S0 — рабочее; S1 — быстрый выход без потери контекста; S3 — сохраняется только память, остальной контекст теряется; S4 — состояние сохраняется вне памяти с минимальным потреблением; S5 — soft off с отключением питания.
+
+\textbf{2.1. Что такое S3?} 
+\begin{quote}
+``The S3 sleeping state is a low wake latency sleeping state where all system context is lost except system memory. CPU, cache, and chip set context are lost in this state. Hardware maintains memory context and restores some CPU and L2 configuration context.'' (\texttt{ACPI\_6.6.md})
+\end{quote}
+S3 (Suspend-to-RAM) сохраняет только оперативную память; контекст процессора и чипсета теряется, пробуждение быстрое.
+
+\textbf{2.2. Что такое S4?} 
+\begin{quote}
+``The S4 sleeping state is the lowest power, longest wake latency sleeping state supported by ACPI. In order to reduce power to a minimum, it is assumed that the hardware platform has powered off all devices. Platform context is maintained.'' (\texttt{ACPI\_6.6.md})
+\end{quote}
+S4 (Hibernate) — минимальное потребление, максимальная задержка пробуждения; предполагается отключение устройств, состояние сохраняется вне оперативной памяти.
+
+\textbf{2.3. Как инициируется переход в сон?} 
+\begin{quote}
+``OSPM initiates the sleeping transition by enabling the appropriate wake events and then programming the SLP\_TYPx field with the desired sleeping state and then setting the SLP\_ENx bit. The system will then enter a sleeping state.'' (\texttt{ACPI\_6.6.md})
+\end{quote}
+Ответ: ОС сначала включает разрешённые события пробуждения, затем записывает код нужного сна в поле SLP\_TYPx и устанавливает бит SLP\_ENx, после чего аппаратная логика уводит систему в выбранное спящее состояние.
+
+\textbf{2.4. Какие биты используются (SLP\_EN, SLP\_TYP)?} 
+\begin{quote}
+``The S3 sleeping state is a low wake latency sleeping state where all system context is lost except system memory...'' (\texttt{ACPI\_6.6.md}) \\
+``The S4 sleeping state is the lowest power, longest wake latency sleeping state supported by ACPI.'' (\texttt{ACPI\_6.6.md}) \\
+``For example, the SLP\_EN bit resides in the PM1x\_CNT register bit 13...'' (\texttt{ACPI\_6.6.md})
+\end{quote}
+Ответ: поле SLP\_TYPx содержит код целевого состояния сна (например, S3 или S4), а бит SLP\_EN (в PM1x\_CNT, бит 13) разрешает переход; комбинация SLP\_TYPx + SLP\_EN определяет конкретный спящий режим при инициировании.
+
+\textbf{3. Чем отличаются S3 и S4?} 
+\begin{quote}
+``The S3 sleeping state is a low wake latency sleeping state where all system context is lost except system memory...'' / ``The S4 sleeping state is the lowest power, longest wake latency sleeping state supported by ACPI.'' (\texttt{ACPI\_6.6.md})
+\end{quote}
+S3 сохраняет только оперативную память и обеспечивает быстрый выход при потере остального контекста; S4 сохраняет состояние вне памяти, отключает питание устройств и даёт максимальное энергосбережение с наибольшей задержкой пробуждения.
+
+\textbf{4. Что такое S0ix?} 
+\begin{quote}
+``Value since last reset that the entire SOC is in an S0i3 state. Count at the same frequency as the TSC.'' (\texttt{Intel-SDM.md})
+\end{quote}
+Ответ: S0ix — семейство глубоких состояний малой мощности внутри рабочего состояния G0/S0; пример S0i3 отслеживается счётчиком времени пребывания и даёт очень низкое потребление при быстром выходе.
+
+\end{document}
