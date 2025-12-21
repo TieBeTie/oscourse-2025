@@ -2,6 +2,7 @@
 #define JOS_KERN_KDEBUG_H
 
 #include <inc/types.h>
+#include <inc/dwarf.h>
 
 #define RIPDEBUG_BUFSIZ 256
 
@@ -20,6 +21,8 @@ struct Ripdebuginfo {
     uintptr_t rip_fn_addr;
     /* Number of function arguments */
     int rip_fn_narg;
+    /* Function parameters */
+    struct Dwarf_VarInfo rip_fn_params[DWARF_MAXPARAMS];
 };
 
 int debuginfo_rip(uintptr_t eip, struct Ripdebuginfo *info);

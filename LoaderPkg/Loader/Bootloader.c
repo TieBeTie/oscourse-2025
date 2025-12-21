@@ -642,6 +642,7 @@ LoadKernel (
     {".debug_str",      OFFSET_OF (LOADER_PARAMS, DebugStrStart),      OFFSET_OF (LOADER_PARAMS, DebugStrEnd)},
     {".debug_pubnames", OFFSET_OF (LOADER_PARAMS, DebugPubnamesStart), OFFSET_OF (LOADER_PARAMS, DebugPubnamesEnd)},
     {".debug_pubtypes", OFFSET_OF (LOADER_PARAMS, DebugPubtypesStart), OFFSET_OF (LOADER_PARAMS, DebugPubtypesEnd)},
+    {".debug_loc",      OFFSET_OF (LOADER_PARAMS, DebugLocStart),      OFFSET_OF (LOADER_PARAMS, DebugLocEnd)},
     {".symtab",         OFFSET_OF (LOADER_PARAMS, SymbolTableStart),   OFFSET_OF (LOADER_PARAMS, SymbolTableEnd)},
     {".strtab",         OFFSET_OF (LOADER_PARAMS, StringTableStart),   OFFSET_OF (LOADER_PARAMS, StringTableEnd)},
   };

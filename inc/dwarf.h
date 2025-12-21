@@ -321,6 +321,62 @@
 #define DW_LNE_lo_user           0x80 /* DWARF3 */
 #define DW_LNE_hi_user           0xff /* DWARF3 */
 
+/* From DWARF4 specification, Section 7.23 "DWARF Expression Operations", Figure 24:
+ * "DW_OP_addr - The DW_OP_addr operation has a single operand that encodes a machine address
+ * and whose size is the size of an address on the target machine."
+ * "DW_OP_reg0, DW_OP_reg1, ..., DW_OP_reg31 - The DW_OP_regn operations encode the names of
+ * up to 32 registers, numbered from 0 through 31, inclusive."
+ * "DW_OP_fbreg - The DW_OP_fbreg operation provides a signed LEB128 offset from the address
+ * specified by the location description in the DW_AT_frame_base attribute of the current function."
+ * "DW_OP_call_frame_cfa - pushes the value of the CFA, obtained from the Call Frame Information."
+ * 
+ * Операции DWARF выражений для вычисления расположения переменных и параметров.
+ * DW_OP_addr используется для абсолютных адресов, DW_OP_reg6 (RBP) для регистров,
+ * DW_OP_fbreg для смещений от frame base, DW_OP_call_frame_cfa для CFA (Call Frame Address).
+ */
+#define DW_OP_addr           0x03
+#define DW_OP_reg0           0x50
+#define DW_OP_reg1           0x51
+#define DW_OP_reg2           0x52
+#define DW_OP_reg3           0x53
+#define DW_OP_reg4           0x54
+#define DW_OP_reg5           0x55  /* Register 5 = %rdi (first parameter in x86-64 ABI) */
+#define DW_OP_reg6           0x56
+#define DW_OP_reg31          0x6f  /* Register 31 */
+#define DW_OP_breg0          0x70  /* Base register 0 + signed LEB128 offset */
+#define DW_OP_breg31         0x8f  /* Base register 31 + signed LEB128 offset */
+#define DW_OP_breg6          0x76  /* Base register 6 (RBP) + signed LEB128 offset */
+#define DW_OP_fbreg          0x91
+#define DW_OP_call_frame_cfa 0x9c
+#define DW_OP_stack_value    0x9f  /* Value is on expression stack, not a location */
+#define DW_OP_GNU_entry_value 0xf3  /* GNU extension: entry value of variable */
+
+/* From DWARF4 specification, Section 5.1 "Base Type Entries", Figure 25:
+ * "A base type entry has a DW_AT_encoding attribute describing how the base type is encoded
+ * and is to be interpreted. The value of this attribute is an integer constant."
+ * 
+ * Кодировки базовых типов для атрибута DW_AT_encoding. Используются для определения
+ * вида типа (signed/unsigned integer, floating point, pointer) при парсинге параметров функций.
+ */
+#define DW_ATE_address         0x01
+#define DW_ATE_boolean         0x02
+#define DW_ATE_complex_float   0x03
+#define DW_ATE_float           0x04
+#define DW_ATE_signed          0x05
+#define DW_ATE_signed_char     0x06
+#define DW_ATE_unsigned        0x07
+#define DW_ATE_unsigned_char   0x08
+#define DW_ATE_imaginary_float 0x09
+#define DW_ATE_packed_decimal  0x0a
+#define DW_ATE_numeric_string  0x0b
+#define DW_ATE_edited          0x0c
+#define DW_ATE_signed_fixed    0x0d
+#define DW_ATE_unsigned_fixed  0x0e
+#define DW_ATE_decimal_float   0x0f
+#define DW_ATE_UTF             0x10
+#define DW_ATE_lo_user         0x80
+#define DW_ATE_hi_user         0xff
+
 typedef unsigned long long Dwarf_Unsigned;
 typedef signed long long Dwarf_Signed;
 typedef unsigned long long Dwarf_Off;
@@ -344,7 +400,70 @@ struct Dwarf_Addrs {
     const unsigned char *pubnames_end;
     const unsigned char *pubtypes_begin;
     const unsigned char *pubtypes_end;
+    const unsigned char *loc_begin;
+    const unsigned char *loc_end;
 };
+
+/* Константы для ограничения размеров буферов и массивов при парсинге DWARF информации.
+ * Используются для предотвращения переполнения буферов и ограничения сложности парсинга.
+ * DWARF_BUFSIZ - размер буфера для имён переменных и типов.
+ * DWARF_MAXPARAMS - максимальное количество параметров функции для отображения в backtrace.
+ * DWARF_MAX_STRUCT_FIELDS - максимальное количество полей структуры (не используется в текущей реализации).
+ */
+#define DWARF_BUFSIZ 127
+#define DWARF_MAXPARAMS 127
+#define DWARF_MAX_STRUCT_FIELDS 31
+
+enum Dwarf_VarKind {
+    KIND_UNKNOWN,
+    KIND_SIGNED_INT,
+    KIND_UNSIGNED_INT,
+    KIND_FLOATING_POINT,
+    KIND_POINTER,
+    KIND_STRUCT,
+    KIND_ARRAY,
+    KIND_STRING,
+};
+
+/* From DWARF4 specification, Section 4.1 "Data Object Entries":
+ * "Program variables, formal parameters and constants are represented by debugging information
+ * entries with the tags DW_TAG_variable, DW_TAG_formal_parameter and DW_TAG_constant, respectively."
+ * 
+ * From DWARF4 specification, Section 3.3.4 "Declarations Owned by Subroutines and Entry Points":
+ * "Entries representing the formal parameters of the subroutine or entry point appear in the same
+ * order as the corresponding declarations in the source program."
+ * 
+ * From DWARF4 specification, Section 4.1 "Data Object Entries":
+ * "A DW_AT_name attribute, whose value is a null-terminated string, containing the data object name
+ * as it appears in the source program."
+ * "A DW_AT_type attribute describing the type of the variable, constant or formal parameter."
+ * "A DW_AT_location attribute, whose value describes the location of a variable or parameter at run-time."
+ * 
+ * Структура для хранения информации о параметре функции, извлечённой из DWARF информации.
+ * Используется для отображения параметров в backtrace с их именами, типами и значениями.
+ * address - смещение относительно RBP (из DW_AT_location или fallback на стандартные смещения ABI).
+ * name - имя параметра из DW_AT_name.
+ * kind - вид типа для корректного форматирования значения.
+ * byte_size - размер типа в байтах из DW_AT_byte_size.
+ * type_name - полное имя типа для отображения.
+ * is_variadic - флаг для variadic-параметров (DW_TAG_unspecified_parameters).
+ * fields - зарезервировано для будущего расширения (поля структур, базовый тип указателей).
+ */
+struct Dwarf_VarInfo {
+    int64_t address;
+    char name[DWARF_BUFSIZ];
+    enum Dwarf_VarKind kind;
+    uint8_t byte_size;
+    char type_name[DWARF_BUFSIZ];
+    bool is_variadic;
+    /* For structures and unions - information about fields
+     * For pointers and arrays - fields[0] contains underlying type
+     */
+    struct Dwarf_VarInfo **fields;
+};
+
+#define UNKNOWN            "<unknown>"
+#define UNKNOWN_TYPE       "<unknown type>"
 
 /* Unaligned read from address `addr` */
 #define get_unaligned(addr, type) ({            \
@@ -381,7 +500,7 @@ struct Dwarf_Addrs {
 int info_by_address(const struct Dwarf_Addrs *addrs, uintptr_t p, Dwarf_Off *store);
 int file_name_by_info(const struct Dwarf_Addrs *addrs, Dwarf_Off offset, char **buf, Dwarf_Off *line_off);
 int line_for_address(const struct Dwarf_Addrs *addrs, uintptr_t p, Dwarf_Off line_offset, int *store);
-int function_by_info(const struct Dwarf_Addrs *addrs, uintptr_t p, Dwarf_Off cu_offset, char **buf, uintptr_t *offset);
+int function_by_info(const struct Dwarf_Addrs *addrs, uintptr_t p, Dwarf_Off cu_offset, char **buf, uintptr_t *offset, struct Dwarf_VarInfo *params, int *nparams);
 int address_by_fname(const struct Dwarf_Addrs *addrs, const char *fname, uintptr_t *offset);
 int naive_address_by_fname(const struct Dwarf_Addrs *addrs, const char *fname, uintptr_t *offset);
 
@@ -462,7 +581,7 @@ dwarf_read_leb128(const char *addr, int64_t *ret) {
 
     /* The number of bits in a signed integer. */
     if (shift < 8 * sizeof(result) && byte & 0x40)
-        result |= (-1U << shift);
+        result |= (~0ULL << shift);
 
     *ret = result;
     return count;

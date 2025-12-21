@@ -36,3 +36,6 @@
 /LoaderPkg/mtoc-mac64.sha256
 creds
 grade-lab*
+specifications/*
+docs/*
+*.log

@@ -294,6 +294,20 @@ qemu-nox: $(IMAGES) pre-qemu
 	@echo "***"
 	$(QEMU) -display none $(QEMUOPTS)
 
+qemu-nox-test-all:
+	@echo "***"
+	@echo "*** Running all backtrace tests (GCC and Clang)"
+	@echo "*** Testing with Clang (JOSLLVM=1)"
+	@echo "***"
+	@JOSLLVM=1 D=1 $(MAKE) clean
+	@JOSLLVM=1 D=1 $(MAKE) $(IMAGES) pre-qemu
+	@(sleep 3; echo "test_all"; sleep 10) | timeout 20 $(QEMU) -display none $(QEMUOPTS) 2>&1 | tee qemu-test-clang.log || true
+	@echo ""
+	@echo "***"
+	@echo "*** All tests completed!"
+	@echo "*** Check qemu-test-gcc.log and qemu-test-clang.log for results"
+	@echo "***"
+
 qemu-gdb: $(IMAGES) pre-qemu
 	@echo "***"
 	@echo "*** Now run 'gdb'." 1>&2
