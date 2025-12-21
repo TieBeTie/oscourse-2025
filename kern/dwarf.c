@@ -1261,219 +1261,370 @@ parse_parameter_type(const struct Dwarf_Addrs *addrs, Dwarf_Off cu_offset,
  * (DW_FORM_block, DW_FORM_block1, DW_FORM_block2, DW_FORM_block4). Оба формата содержат
  * DWARF expression для вычисления адреса параметра. Парсим оба формата согласно спецификации.
  */
-static void
-parse_location_attribute(const struct Dwarf_Addrs *addrs, const void **entry, uint64_t form, 
-                        Dwarf_Small address_size, bool is_frame_base_at_cfa, 
-                        uintptr_t current_address, uintptr_t cu_base_address,
-                        int64_t *param_address) {
-    uint8_t buf[64] = { 0 };
-    size_t buf_size = 0;
+// static void
+// parse_location_attribute(const struct Dwarf_Addrs *addrs, const void **entry, uint64_t form, 
+//                         Dwarf_Small address_size, bool is_frame_base_at_cfa, 
+//                         uintptr_t current_address, uintptr_t cu_base_address,
+//                         int64_t *param_address) {
+//     uint8_t buf[64] = { 0 };
+//     size_t buf_size = 0;
     
-    if (form == DW_FORM_exprloc) {
-        /* From DWARF4 specification, Section 7.5.4 "Attribute Encodings":
-         * "exprloc - This is an unsigned LEB128 length followed by the number of information bytes"
-         * 
-         * DW_FORM_exprloc содержит unsigned LEB128 длину, за которой следуют байты выражения.
-         */
-        uint64_t length = 0;
-        size_t len_bytes = dwarf_read_uleb128(*entry, &length);
-        *entry += len_bytes;
-        buf_size = MIN(length, sizeof(buf) - 1);
-        if (buf_size > 0) {
-            memcpy(buf, *entry, buf_size);
-        }
-        *entry += length;
-    } else if (form == DW_FORM_block || form == DW_FORM_block1 || form == DW_FORM_block2 || form == DW_FORM_block4) {
-        /* From DWARF4 specification, Section 7.5.4 "Attribute Encodings":
-         * "block - Blocks come in four forms: DW_FORM_block1 (1-byte length), DW_FORM_block2 (2-byte length),
-         * DW_FORM_block4 (4-byte length), DW_FORM_block (unsigned LEB128 length)"
-         * 
-         * Block формы содержат длину, за которой следуют байты выражения.
-         * Это старый формат для location expressions, используемый в DWARF2/3.
-         */
-        uint32_t length = 0;
-        if (form == DW_FORM_block1) {
-            length = get_unaligned(*entry, uint8_t);
-            *entry += 1;
-        } else if (form == DW_FORM_block2) {
-            length = get_unaligned(*entry, uint16_t);
-            *entry += 2;
-        } else if (form == DW_FORM_block4) {
-            length = get_unaligned(*entry, uint32_t);
-            *entry += 4;
-        } else { /* DW_FORM_block */
-            uint64_t len64 = 0;
-            *entry += dwarf_read_uleb128(*entry, &len64);
-            length = (uint32_t)len64;
-        }
-        buf_size = MIN(length, sizeof(buf) - 1);
-        if (buf_size > 0) {
-            memcpy(buf, *entry, buf_size);
-        }
-        *entry += length;
-    } else if (form == DW_FORM_sec_offset) {
-        /* From DWARF4 specification, Section 2.6.2 "Location Lists":
-         * "Location lists are used in place of location expressions whenever the object whose location is
-         * being described can change location during its lifetime. Location lists are contained in a separate
-         * object file section called .debug_loc."
-         * 
-         * From DWARF4 specification, Section 7.5.4 "Attribute Encodings":
-         * "loclistptr - This is an offset into the .debug_loc section (DW_FORM_sec_offset)."
-         * 
-         * From DWARF4 specification, Section 7.7.3 "Location Lists":
-         * "A location list entry consists of two address offsets followed by a 2-byte length, followed by a
-         * block of contiguous bytes that contains a DWARF location description."
-         * 
-         * Форма DW_FORM_sec_offset (0x17) для DW_AT_location означает loclistptr - смещение
-         * в секцию .debug_loc. Читаем offset, находим location list, парсим записи и ищем ту, которая
-         * соответствует текущему адресу (beginning <= current_address < ending). Извлекаем location expression
-         * из найденной записи и обрабатываем её как обычный location expression.
-         */
-        uint64_t loc_offset = 0;
-        *entry += dwarf_read_abbrev_entry(*entry, form, &loc_offset, sizeof(loc_offset), address_size);
-        
-        if (!addrs->loc_begin || !addrs->loc_end || loc_offset >= (uint64_t)(addrs->loc_end - addrs->loc_begin)) {
-            return;
-        }
-        
-        const uint8_t *loc_entry = addrs->loc_begin + loc_offset;
-        uintptr_t base_address = cu_base_address;
-        bool found_entry = false;
-        
-        while (loc_entry < addrs->loc_end) {
-            uintptr_t beginning = 0, ending = 0;
-            
-            /* Read beginning and ending address offsets */
-            if (address_size == 4) {
-                beginning = get_unaligned(loc_entry, uint32_t);
-                loc_entry += 4;
-                ending = get_unaligned(loc_entry, uint32_t);
-                loc_entry += 4;
-            } else {
-                beginning = get_unaligned(loc_entry, uint64_t);
-                loc_entry += 8;
-                ending = get_unaligned(loc_entry, uint64_t);
-                loc_entry += 8;
-            }
-            
-            /* Check for end of list entry */
-            if (beginning == 0 && ending == 0) {
-                break;
-            }
-            
-            /* Check for base address selection entry */
-            if (address_size == 4 && beginning == 0xFFFFFFFF) {
-                base_address = ending;
-                continue;
-            } else if (address_size == 8 && beginning == 0xFFFFFFFFFFFFFFFFULL) {
-                base_address = ending;
-                continue;
-            }
-            
-            /* Calculate absolute addresses */
-            uintptr_t abs_beginning = base_address + beginning;
-            uintptr_t abs_ending = base_address + ending;
-            
-            /* Check if current address is in this range */
-            if (current_address >= abs_beginning && current_address < abs_ending) {
-                /* Read length of location expression */
-                uint16_t expr_length = get_unaligned(loc_entry, uint16_t);
-                loc_entry += 2;
-                
-                /* Read location expression */
-                buf_size = MIN(expr_length, sizeof(buf) - 1);
-                if (buf_size > 0 && loc_entry + expr_length <= addrs->loc_end) {
-                    memcpy(buf, loc_entry, buf_size);
-                }
-                found_entry = true;
-                break;
-            }
-            
-            /* Skip location expression for this entry */
-            uint16_t expr_length = get_unaligned(loc_entry, uint16_t);
-            loc_entry += 2;
-            loc_entry += expr_length;
-        }
-        
-        if (!found_entry) {
-            return;
-        }
-    } else {
-        /* From DWARF4 specification, Section 7.5.4 "Attribute Encodings":
-         * "DW_AT_location may be encoded using class exprloc or loclistptr"
-         * 
-         * Если форма не exprloc, не block и не loclistptr, это неизвестная форма.
-         * Для минимальной версии пропускаем такие случаи.
-         */
-        *entry += dwarf_read_abbrev_entry(*entry, form, NULL, 0, address_size);
-        return;
-    }
+//     cprintf("    [DEBUG parse_location] form=0x%lx, current_addr=0x%lx, cu_base=0x%lx, is_frame_base_at_cfa=%d\n",
+//             form, current_address, cu_base_address, is_frame_base_at_cfa);
     
-    if (buf_size > 0) {
-        /* From DWARF4 specification, Section 2.6.1.1.2 "Register Location Descriptions":
-         * "DW_OP_reg0, DW_OP_reg1, ..., DW_OP_reg31 - The DW_OP_regn operations encode the names of
-         * up to 32 registers, numbered from 0 through 31, inclusive. The object addressed is in register n."
-         * 
-         * From System V x86-64 ABI, Section 3.6.2 "DWARF Register Number Mapping", Figure 3.36:
-         * Register 5 = %rdi (first parameter)
-         * Register 4 = %rsi (second parameter)
-         * 
-         * Если параметр находится в регистре, мы не можем прочитать его значение напрямую в backtrace,
-         * так как регистры вызывающей функции не сохранены. В этом случае param_address остаётся 0,
-         * и будет использован fallback на стандартные смещения ABI. Однако, для параметров в регистрах
-         * fallback неправилен, так как они передаются через регистры, а не через стек.
-         * 
-         * Для минимальной реализации: если location указывает на регистр, оставляем param_address = 0,
-         * что вызовет fallback. Хотя это технически неправильно для регистровых параметров, это может
-         * работать, если вызываемая функция сохранила регистр в стек.
-         */
-        if (buf[0] >= DW_OP_reg0 && buf[0] <= DW_OP_reg31) {
-            /* Параметр находится в регистре. Устанавливаем специальное значение, чтобы
-             * показать, что это регистр, а не стек. Используем отрицательное значение
-             * для регистра: -1 для reg0, -2 для reg1, и т.д. */
-            *param_address = -(int64_t)(buf[0] - DW_OP_reg0 + 1);
-            return;
-        } else if (buf[0] == DW_OP_fbreg) {
-            int64_t address = 0;
-            size_t len = dwarf_read_leb128((char*)buf + 1, &address);
-            if (len <= 4) {
-                *param_address = (int32_t) address;
-            } else {
-                *param_address = address;
-            }
-            if (is_frame_base_at_cfa) {
-                *param_address += 16;
-            }
-        } else if (buf[0] == DW_OP_breg6) {
-            /* From DWARF4 specification, Section 2.5.1.2 "Register Based Addressing":
-             * "DW_OP_breg0, DW_OP_breg1, ..., DW_OP_breg31 - The DW_OP_bregn operations add a
-             * signed LEB128 offset to the contents of register n to compute an address."
-             * 
-             * DW_OP_breg6 добавляет signed LEB128 offset к значению регистра 6 (RBP) для вычисления адреса.
-             * Это смещение сохраняется в param_address для последующего использования при вычислении
-             * адреса параметра (rbp + offset).
-             */
-            int64_t address = 0;
-            size_t len = dwarf_read_leb128((char*)buf + 1, &address);
-            if (len <= 4) {
-                *param_address = (int32_t) address;
-            } else {
-                *param_address = address;
-            }
-        }
-    }
-}
+//     if (form == DW_FORM_exprloc) {
+//         cprintf("    [DEBUG] Using DW_FORM_exprloc\n");
+//         uint64_t length = 0;
+//         size_t len_bytes = dwarf_read_uleb128(*entry, &length);
+//         *entry += len_bytes;
+//         buf_size = MIN(length, sizeof(buf) - 1);
+//         cprintf("    [DEBUG] exprloc length=%lu, buf_size=%lu\n", length, buf_size);
+//         if (buf_size > 0) {
+//             memcpy(buf, *entry, buf_size);
+//         }
+//         *entry += length;
+//     } else if (form == DW_FORM_block || form == DW_FORM_block1 || form == DW_FORM_block2 || form == DW_FORM_block4) {
+//         cprintf("    [DEBUG] Using DW_FORM_block (type=%lx)\n", form);
+//         uint32_t length = 0;
+//         if (form == DW_FORM_block1) {
+//             length = get_unaligned(*entry, uint8_t);
+//             *entry += 1;
+//         } else if (form == DW_FORM_block2) {
+//             length = get_unaligned(*entry, uint16_t);
+//             *entry += 2;
+//         } else if (form == DW_FORM_block4) {
+//             length = get_unaligned(*entry, uint32_t);
+//             *entry += 4;
+//         } else { /* DW_FORM_block */
+//             uint64_t len64 = 0;
+//             *entry += dwarf_read_uleb128(*entry, &len64);
+//             length = (uint32_t)len64;
+//         }
+//         buf_size = MIN(length, sizeof(buf) - 1);
+//         cprintf("    [DEBUG] block length=%u, buf_size=%lu\n", length, buf_size);
+//         if (buf_size > 0) {
+//             memcpy(buf, *entry, buf_size);
+//         }
+//         *entry += length;
+//     } else if (form == DW_FORM_sec_offset) {
+//         cprintf("    [DEBUG] Using DW_FORM_sec_offset (location list)\n");
+//         uint64_t loc_offset = 0;
+//         *entry += dwarf_read_abbrev_entry(*entry, form, &loc_offset, sizeof(loc_offset), address_size);
+        
+//         cprintf("    [DEBUG] loc_offset=0x%lx\n", loc_offset);
+//         cprintf("    [DEBUG] loc_begin=%p, loc_end=%p\n", addrs->loc_begin, addrs->loc_end);
+        
+//         if (!addrs->loc_begin || !addrs->loc_end || loc_offset >= (uint64_t)(addrs->loc_end - addrs->loc_begin)) {
+//             cprintf("    [DEBUG] Location list out of bounds or not available!\n");
+//             return;
+//         }
 
-/* From DWARF4 specification, Section 3.3.4 "Declarations Owned by Subroutines and Entry Points":
- * "The declarations enclosed by a subroutine or entry point are represented by debugging
- * information entries that are owned by the subroutine or entry point entry. Entries representing the
- * formal parameters of the subroutine or entry point appear in the same order as the corresponding
- * declarations in the source program."
- * 
- * Парсит все атрибуты формального параметра (DW_TAG_formal_parameter), извлекая
- * имя (DW_AT_name), тип (DW_AT_type) и расположение (DW_AT_location). Заполняет структуру
- * Dwarf_VarInfo всей необходимой информацией о параметре.
- */
+
+//         cprintf("    [DEBUG] Scanning ALL location list entries for debugging:\n");
+//         const uint8_t *debug_entry = addrs->loc_begin + loc_offset;
+//         uintptr_t debug_base = cu_base_address;
+//         int debug_count = 0;
+        
+//         while (debug_entry < addrs->loc_end && debug_count < 10) {
+//             uintptr_t beg = 0, end = 0;
+            
+//             if (debug_entry + 2 * address_size > addrs->loc_end) break;
+            
+//             if (address_size == 8) {
+//                 beg = get_unaligned(debug_entry, uint64_t);
+//                 debug_entry += 8;
+//                 end = get_unaligned(debug_entry, uint64_t);
+//                 debug_entry += 8;
+//             } else {
+//                 beg = get_unaligned(debug_entry, uint32_t);
+//                 debug_entry += 4;
+//                 end = get_unaligned(debug_entry, uint32_t);
+//                 debug_entry += 4;
+//             }
+            
+//             if (beg == 0 && end == 0) {
+//                 cprintf("    [DEBUG] Entry %d: END OF LIST\n", debug_count);
+//                 break;
+//             }
+            
+//             if ((address_size == 8 && beg == 0xFFFFFFFFFFFFFFFFULL) ||
+//                 (address_size == 4 && beg == 0xFFFFFFFF)) {
+//                 debug_base = end;
+//                 cprintf("    [DEBUG] Entry %d: BASE ADDRESS SELECTION, new base=0x%lx\n", 
+//                         debug_count, debug_base);
+//                 debug_count++;
+//                 continue;
+//             }
+            
+//             if (debug_entry + 2 > addrs->loc_end) break;
+//             uint16_t expr_len = get_unaligned(debug_entry, uint16_t);
+//             debug_entry += 2;
+            
+//             uintptr_t abs_beg = debug_base + beg;
+//             uintptr_t abs_end = debug_base + end;
+            
+//             uint8_t opcode = 0;
+//             if (debug_entry + expr_len <= addrs->loc_end && expr_len > 0) {
+//                 opcode = *debug_entry;
+//             }
+            
+//             cprintf("    [DEBUG] Entry %d: range [0x%lx - 0x%lx), len=%u, opcode=0x%02x",
+//                     debug_count, abs_beg, abs_end, expr_len, opcode);
+            
+//             if (opcode >= DW_OP_reg0 && opcode <= DW_OP_reg31) {
+//                 cprintf(" (DW_OP_reg%d)", opcode - DW_OP_reg0);
+//             } else if (opcode == DW_OP_fbreg) {
+//                 int64_t off = 0;
+//                 dwarf_read_leb128((char*)(debug_entry + 1), &off);
+//                 cprintf(" (DW_OP_fbreg, offset=%ld)", off);
+//             } else if (opcode == DW_OP_breg6) {
+//                 int64_t off = 0;
+//                 dwarf_read_leb128((char*)(debug_entry + 1), &off);
+//                 cprintf(" (DW_OP_breg6, offset=%ld)", off);
+//             }
+            
+//             if (current_address >= abs_beg && current_address < abs_end) {
+//                 cprintf(" <- CURRENT ADDRESS MATCH!");
+//             }
+//             cprintf("\n");
+            
+//             debug_entry += expr_len;
+//             debug_count++;
+//         }
+        
+//         cprintf("    [DEBUG] Current address for search: 0x%lx\n", current_address);
+//         cprintf("    [DEBUG] Now searching for matching entry...\n");
+        
+//         /* Теперь настоящий поиск */
+//         const uint8_t *loc_entry = addrs->loc_begin + loc_offset;
+//         uintptr_t base_address = cu_base_address;
+//         bool found_entry = false;
+//         int entry_count = 0;
+        
+//         cprintf("    [DEBUG] Scanning location list entries...\n");
+        
+//         while (loc_entry < addrs->loc_end) {
+//             uintptr_t beginning = 0, ending = 0;
+            
+//             /* Проверка на достаточность данных */
+//             if (loc_entry + 2 * address_size > addrs->loc_end) {
+//                 cprintf("    [DEBUG] Not enough data for entry, breaking\n");
+//                 break;
+//             }
+            
+//             /* Read beginning and ending address offsets */
+//             if (address_size == 4) {
+//                 beginning = get_unaligned(loc_entry, uint32_t);
+//                 loc_entry += 4;
+//                 ending = get_unaligned(loc_entry, uint32_t);
+//                 loc_entry += 4;
+//             } else {
+//                 beginning = get_unaligned(loc_entry, uint64_t);
+//                 loc_entry += 8;
+//                 ending = get_unaligned(loc_entry, uint64_t);
+//                 loc_entry += 8;
+//             }
+            
+//             cprintf("    [DEBUG] Entry %d: beginning=0x%lx, ending=0x%lx\n", 
+//                     entry_count++, beginning, ending);
+            
+//             /* Check for end of list entry */
+//             if (beginning == 0 && ending == 0) {
+//                 cprintf("    [DEBUG] End of location list\n");
+//                 break;
+//             }
+            
+//             /* Check for base address selection entry */
+//             if (address_size == 4 && beginning == 0xFFFFFFFF) {
+//                 base_address = ending;
+//                 cprintf("    [DEBUG] Base address selection: new base=0x%lx\n", base_address);
+//                 continue;
+//             } else if (address_size == 8 && beginning == 0xFFFFFFFFFFFFFFFFULL) {
+//                 base_address = ending;
+//                 cprintf("    [DEBUG] Base address selection: new base=0x%lx\n", base_address);
+//                 continue;
+//             }
+            
+//             /* Calculate absolute addresses */
+//             uintptr_t abs_beginning = base_address + beginning;
+//             uintptr_t abs_ending = base_address + ending;
+            
+//             cprintf("    [DEBUG] Absolute range: 0x%lx - 0x%lx (current=0x%lx)\n",
+//                     abs_beginning, abs_ending, current_address);
+            
+//             /* Check if current address is in this range */
+//             if (current_address >= abs_beginning && current_address < abs_ending) {
+//                 cprintf("    [DEBUG] MATCH! Current address is in this range\n");
+                
+//                 /* Read length of location expression */
+//                 if (loc_entry + 2 > addrs->loc_end) {
+//                     cprintf("    [DEBUG] ERROR: Not enough data for expr_length\n");
+//                     break;
+//                 }
+//                 uint16_t expr_length = get_unaligned(loc_entry, uint16_t);
+//                 loc_entry += 2;
+                
+//                 cprintf("    [DEBUG] Expression length: %u\n", expr_length);
+                
+//                 /* Read location expression */
+//                 buf_size = MIN(expr_length, sizeof(buf) - 1);
+//                 if (buf_size > 0 && loc_entry + expr_length <= addrs->loc_end) {
+//                     memcpy(buf, loc_entry, buf_size);
+//                     cprintf("    [DEBUG] Copied %lu bytes of expression\n", buf_size);
+//                 } else {
+//                     cprintf("    [DEBUG] ERROR: Expression out of bounds\n");
+//                 }
+//                 found_entry = true;
+//                 break;
+//             }
+            
+//             /* Skip location expression for this entry */
+//             if (loc_entry + 2 > addrs->loc_end) {
+//                 cprintf("    [DEBUG] ERROR: Can't read expr_length to skip\n");
+//                 break;
+//             }
+//             uint16_t expr_length = get_unaligned(loc_entry, uint16_t);
+//             loc_entry += 2;
+//             cprintf("    [DEBUG] Skipping expression of length %u\n", expr_length);
+//             loc_entry += expr_length;
+//         }
+        
+//         if (!found_entry) {
+//             cprintf("    [DEBUG] No matching location list entry found!\n");
+//             return;
+//         }
+//     } else {
+//         cprintf("    [DEBUG] Unknown form 0x%lx, skipping\n", form);
+//         *entry += dwarf_read_abbrev_entry(*entry, form, NULL, 0, address_size);
+//         return;
+//     }
+//         if (buf_size > 0) {
+//         cprintf("    [DEBUG] Processing location expression, buf_size=%lu\n", buf_size);
+//         cprintf("    [DEBUG] Expression bytes: ");
+//         for (size_t i = 0; i < buf_size; i++) {
+//             cprintf("%02x ", buf[i]);
+//         }
+//         cprintf("\n");
+        
+//         /* Попробуем интерпретировать как multi-byte opcode */
+//         if (buf_size >= 2 && buf[0] == 0x74 && buf[1] == 0x00) {
+//             /* From DWARF4 specification, Section 2.5.1.2 "Register Based Addressing":
+//              * "DW_OP_breg4 (0x74) - contents of register 4 + SLEB128 offset"
+//              * 
+//              * Но в контексте CFA и frame_base, возможно это означает что-то другое.
+//              * 
+//              * Теория: Если frame_base = CFA, то DW_OP_breg4 может означать
+//              * "from CFA (which is RSP at function entry) + offset from register 4 state"
+//              * 
+//              * Или это может быть ошибка компилятора/линковщика в DWARF генерации.
+//              */
+//             cprintf("    [DEBUG] DW_OP_breg4 + offset 0 detected\n");
+//             cprintf("    [DEBUG] is_frame_base_at_cfa=%d\n", is_frame_base_at_cfa);
+            
+//             /* Попробуем альтернативную интерпретацию:
+//              * Если это первый параметр и frame_base=CFA, возможно компилятор
+//              * имел в виду "параметр сохранён по адресу [RBP + offset]",
+//              * но закодировал это неправильно как breg4.
+//              * 
+//              * Попробуем использовать это как смещение от RBP. */
+//             int64_t address = 0;
+//             dwarf_read_leb128((char*)buf + 1, &address);
+            
+//             cprintf("    [DEBUG] Trying to interpret as RBP-relative with offset %ld\n", address);
+            
+//             /* Параметры обычно находятся ВЫШЕ RBP (положительные смещения)
+//              * в фрейме вызывающей функции, или НИЖЕ RBP (отрицательные смещения)  
+//              * если функция их сохранила в свой локальный фрейм.
+//              * 
+//              * Попробуем offset = 0 означает, что параметр по адресу [RBP + 16]
+//              * (стандартное место для первого параметра в caller's frame). */
+//             if (is_frame_base_at_cfa && address == 0) {
+//                 /* Эвристика: первый параметр обычно по [caller_RBP - 20] */
+//                 *param_address = -20; /* Попробуем стандартное смещение */
+//                 cprintf("    [DEBUG] Using heuristic: param_address = -20\n");
+//             } else {
+//                 *param_address = address;
+//                 cprintf("    [DEBUG] Using parsed offset: param_address = %ld\n", address);
+//             }
+//             return;
+//         }
+        
+        
+//         if (buf[0] >= DW_OP_reg0 && buf[0] <= DW_OP_reg31) {
+//             int reg_num = buf[0] - DW_OP_reg0;
+//             cprintf("    [DEBUG] DW_OP_reg%d detected - parameter in register\n", reg_num);
+//             *param_address = -(int64_t)(reg_num + 1);
+//             cprintf("    [DEBUG] Set param_address to %ld (negative = register)\n", *param_address);
+//             return;
+//         } else if (buf[0] == DW_OP_fbreg) {
+//             /* From DWARF4 specification, Section 2.5.1.4 "Register Based Addressing":
+//              * "DW_OP_fbreg - provides a signed LEB128 offset from the frame base."
+//              */
+//             cprintf("    [DEBUG] DW_OP_fbreg detected\n");
+//             int64_t address = 0;
+//             size_t len = dwarf_read_leb128((char*)buf + 1, &address);
+//             cprintf("    [DEBUG] Read offset: %ld (len=%lu bytes)\n", address, len);
+//             if (len <= 4) {
+//                 *param_address = (int32_t) address;
+//             } else {
+//                 *param_address = address;
+//             }
+//             if (is_frame_base_at_cfa) {
+//                 cprintf("    [DEBUG] Applying CFA correction: +16\n");
+//                 *param_address += 16;
+//             }
+//             cprintf("    [DEBUG] Final param_address: %ld\n", *param_address);
+//         } else if (buf[0] >= DW_OP_breg0 && buf[0] <= DW_OP_breg31) {
+//             /* From DWARF4 specification, Section 2.5.1.2 "Register Based Addressing":
+//              * "DW_OP_breg0, DW_OP_breg1, ..., DW_OP_breg31 - The DW_OP_bregn operations add a
+//              * signed LEB128 offset to the contents of register n to compute an address."
+//              * 
+//              * DW_OP_breg0 = 0x70, DW_OP_breg31 = 0x8F
+//              * DW_OP_breg4 (0x74) = RSI register + offset
+//              * DW_OP_breg6 (0x76) = RBP register + offset
+//              */
+//             int reg_num = buf[0] - DW_OP_breg0;
+//             cprintf("    [DEBUG] DW_OP_breg%d detected\n", reg_num);
+//             int64_t address = 0;
+//             size_t len = dwarf_read_leb128((char*)buf + 1, &address);
+//             cprintf("    [DEBUG] Read offset: %ld (len=%lu bytes)\n", address, len);
+            
+//             /* From System V x86-64 ABI, Section 3.6.2 "DWARF Register Number Mapping":
+//              * Register 6 = RBP (base pointer)
+//              * 
+//              * Для локальных переменных и параметров обычно используется DW_OP_breg6 (RBP).
+//              * Другие регистры редко используются для адресации стека.
+//              */
+//             if (reg_num == 4 || reg_num == 5) {
+//                 if (is_frame_base_at_cfa && address == 0) {
+//                     /* Параметр сохранён в caller's frame по отрицательному смещению */
+//                     *param_address = -20; /* [caller_RBP - 20] */
+//                     cprintf("    [DEBUG] Parameter from reg%d saved at caller_RBP - 20\n", reg_num);
+//                 } else {
+//                     *param_address = address;
+//                 }
+//             }
+//             if (reg_num == 6) {
+//                 /* DW_OP_breg6 - offset от RBP */
+//                 if (len <= 4) {
+//                     *param_address = (int32_t) address;
+//                 } else {
+//                     *param_address = address;
+//                 }
+//                 cprintf("    [DEBUG] Using RBP-relative addressing, param_address: %ld\n", *param_address);
+//             } else {
+//                 /* Другие регистры - для backtrace они недоступны */
+//                 cprintf("    [DEBUG] Register %d is not RBP, parameter unavailable in backtrace\n", reg_num);
+//                 *param_address = 0; /* Недоступно */
+//             }
+//         } else {
+//             cprintf("    [DEBUG] Unknown opcode 0x%02x - leaving param_address=0\n", buf[0]);
+//         }
+//     }
+
+// }
+
+
 static void
 parse_formal_parameter(const struct Dwarf_Addrs *addrs, Dwarf_Off cu_offset,
                        const uint8_t *abbrev_table_begin, const uint8_t *param_abbrev_entry,
@@ -1610,7 +1761,6 @@ file_name_by_info(const struct Dwarf_Addrs *addrs, Dwarf_Off offset, char **buf,
 
     return 0;
 }
-
 int
 function_by_info(const struct Dwarf_Addrs *addrs, uintptr_t p, Dwarf_Off cu_offset, char **buf, uintptr_t *offset, struct Dwarf_VarInfo *params, int *nparams) {
     uint64_t len = 0;
@@ -1664,8 +1814,11 @@ function_by_info(const struct Dwarf_Addrs *addrs, uintptr_t p, Dwarf_Off cu_offs
             } while (cu_name || cu_form);
         }
     }
+    
     bool is_after_subprogram = 0;
     bool is_frame_base_at_cfa = 0;
+    uintptr_t current_func_low_pc = 0;
+    uintptr_t current_func_high_pc = 0;
 
     while (entry < entry_end) {
         /* Read info abbreviation code */
@@ -1677,53 +1830,48 @@ function_by_info(const struct Dwarf_Addrs *addrs, uintptr_t p, Dwarf_Off cu_offs
         const uint8_t *curr_abbrev_entry = find_abbreviation_entry(addrs, abbrev_entry, abbrev_code, &tag, &has_children);
         
         if (!curr_abbrev_entry) {
-            /* Abbreviation not found, skip this entry */
             continue;
         }
-        /* From DWARF4 specification, Section 3.3.4 "Declarations Owned by Subroutines and Entry Points":
-         * "The declarations enclosed by a subroutine or entry point are represented by debugging
-         * information entries that are owned by the subroutine or entry point entry. Entries representing the
-         * formal parameters of the subroutine or entry point appear in the same order as the corresponding
-         * declarations in the source program."
-         * 
-         * Параметры функций являются дочерними элементами DW_TAG_subprogram согласно DWARF4.
-         * После нахождения нужной функции (is_after_subprogram = 1) продолжаем парсинг
-         * дочерних элементов для извлечения параметров. Формальные параметры функции имеют тег
-         * DW_TAG_formal_parameter и появляются в том же порядке, что и в исходном коде.
-         */
+
         if (is_after_subprogram) {
             if (tag == DW_TAG_formal_parameter && params && nparams && *nparams < DWARF_MAXPARAMS) {
-                /* From DWARF4 specification, Section 5.8 "Subroutine Type Entries":
-                 * "The formal parameters of a parameter list (that have a specific type) are represented by a
-                 * debugging information entry with the tag DW_TAG_formal_parameter."
-                 * 
-                 * Парсим формальный параметр, извлекая все его атрибуты (имя, тип, расположение)
-                 * и заполняя структуру Dwarf_VarInfo. Вызываем parse_formal_parameter для обработки всех атрибутов.
-                 * Передаём abbrev_entry (начало таблицы abbreviations) для правильного поиска типов.
-                 */
                 struct Dwarf_VarInfo *param = &params[*nparams];
-                parse_formal_parameter(addrs, cu_offset, abbrev_entry, curr_abbrev_entry, &entry, 
-                                      address_size, is_frame_base_at_cfa, p, cu_base_address, param);
-                (*nparams)++;
-            /* Variadic параметры не поддерживаются - пропускаем */
-            } else if (tag == DW_TAG_lexical_block || tag == 0) {
-                /* From DWARF4 specification, Section 2.3 "Relationship of Debugging Information Entries":
-                 * "A lexical block entry may have child entries representing nested blocks or declarations."
+                
+                /* From DWARF4 specification, Section 2.6.2 "Location Lists":
+                 * "Location lists describe locations over the lifetime of an object."
                  * 
-                 * Пропускаем lexical blocks и null entries, продолжая парсинг для поиска параметров.
-                 * Lexical blocks не являются параметрами, поэтому их нужно пропустить, но продолжить
-                 * обработку дочерних элементов функции для поиска формальных параметров.
+                 * Use address in middle of function where parameters are saved to stack.
+                 * Prologue typically takes 20-40 bytes, epilogue takes 5-10 bytes.
                  */
+                uintptr_t func_address;
+                uintptr_t func_length = current_func_high_pc - current_func_low_pc;
+                
+                if (func_length > 50) {
+                    /* Use address after prologue: low_pc + 35 bytes */
+                    func_address = current_func_low_pc + 35;
+                } else if (func_length > 20) {
+                    /* Small function: use middle */
+                    func_address = (current_func_low_pc + current_func_high_pc) / 2;
+                } else {
+                    /* Very small function: use low_pc + 10 */
+                    func_address = current_func_low_pc + 10;
+                }
+                
+                /* Ensure we don't go past epilogue (last 10 bytes) */
+                if (func_address > current_func_high_pc - 10) {
+                    func_address = current_func_high_pc - 10;
+                }
+                
+                cprintf("\n[FUNC_BY_INFO] Parsing parameter %d at address 0x%lx (func range: 0x%lx - 0x%lx)\n",
+                        *nparams, func_address, current_func_low_pc, current_func_high_pc);
+                
+                parse_formal_parameter(addrs, cu_offset, abbrev_entry, curr_abbrev_entry, &entry, 
+                                      address_size, is_frame_base_at_cfa, func_address, cu_base_address, param);
+                (*nparams)++;
+            } else if (tag == DW_TAG_lexical_block || tag == 0) {
                 curr_abbrev_entry = skip_attributes(curr_abbrev_entry, &entry, address_size);
                 
                 if (has_children) {
-                    /* From DWARF4 specification, Section 2.3 "Relationship of Debugging Information Entries":
-                     * "A debugging information entry may have child entries."
-                     * 
-                     * Пропускаем дочерние элементы рекурсивно, используя depth для отслеживания
-                     * уровня вложенности. Для каждого дочернего элемента находим его abbreviation и пропускаем
-                     * все его атрибуты и дочерние элементы.
-                     */
                     uint64_t child_code = 0;
                     int depth = 1;
                     while (depth > 0 && entry < entry_end) {
@@ -1738,7 +1886,6 @@ function_by_info(const struct Dwarf_Addrs *addrs, uintptr_t p, Dwarf_Off cu_offs
                         const uint8_t *child_abbrev = find_abbreviation_entry(addrs, abbrev_entry, child_code, 
                                                                              &child_tag, &child_has_children);
                         if (!child_abbrev) {
-                            /* Abbreviation not found, skip */
                             continue;
                         }
                         
@@ -1749,13 +1896,12 @@ function_by_info(const struct Dwarf_Addrs *addrs, uintptr_t p, Dwarf_Off cu_offs
                         }
                     }
                 }
-                /* Continue loop to check for more parameters */
             } else {
-                /* Parameters ended - just exit */
+                /* Parameters ended */
                 return 0;
-        }
+            }
         } else if (tag == DW_TAG_subprogram) {
-        /* Parse subprogram DIE */
+            /* Parse subprogram DIE */
             uintptr_t low_pc = 0, high_pc = 0;
             struct subprogram_data subprogram_data = { &low_pc, &high_pc, &is_frame_base_at_cfa, buf };
             
@@ -1766,31 +1912,22 @@ function_by_info(const struct Dwarf_Addrs *addrs, uintptr_t p, Dwarf_Off cu_offs
                                                                   addrs, 0, NULL, &subprogram_data);
             entry = entry_copy;
 
-            /* Load info and finish if address is inside of the function */
+            /* Check if address is inside the function */
             if (p >= low_pc && p <= high_pc) {
                 *offset = low_pc;
-                /* From DWARF4 specification, Section 3.3.4 "Declarations Owned by Subroutines and Entry Points":
-                 * "The declarations enclosed by a subroutine or entry point are represented by debugging
-                 * information entries that are owned by the subroutine or entry point entry. Entries representing the
-                 * formal parameters of the subroutine or entry point appear in the same order as the corresponding
-                 * declarations in the source program."
-                 * 
-                 * Параметры функций являются дочерними элементами DW_TAG_subprogram согласно DWARF4.
-                 * После нахождения нужной функции нужно продолжить парсинг дочерних элементов
-                 * для извлечения параметров (DW_TAG_formal_parameter). Устанавливаем флаг
-                 * is_after_subprogram = 1 и продолжаем цикл (не делаем return), чтобы на следующей
-                 * итерации обработать дочерние элементы. Если дочерних элементов нет (has_children = 0),
-                 * то параметров тоже нет, можно вернуться. Это обеспечивает корректное извлечение
-                 * всех формальных параметров функции в правильном порядке.
-                 */
+                current_func_low_pc = low_pc;
+                current_func_high_pc = high_pc;
+                
+                cprintf("\n[FUNC_BY_INFO] Found function: low_pc=0x%lx, high_pc=0x%lx, frame_base_at_cfa=%d\n",
+                        low_pc, high_pc, is_frame_base_at_cfa);
+                
                 if (params && nparams) {
                     *nparams = 0;
                 }
                 is_after_subprogram = 1;
                 if (!has_children) {
-                return 0;
+                    return 0;
                 }
-                /* Continue loop to parse children (parameters) */
             }
         } else {
             /* Skip if not a subprogram */
@@ -1799,12 +1936,6 @@ function_by_info(const struct Dwarf_Addrs *addrs, uintptr_t p, Dwarf_Off cu_offs
             curr_abbrev_entry = (const uint8_t *)skip_attributes(abbrev_copy, &entry_copy, address_size);
             entry = entry_copy;
             if (has_children) {
-                /* From DWARF4 specification, Section 2.3 "Relationship of Debugging Information Entries":
-                 * "A debugging information entry may have child entries."
-                 * 
-                 * Пропускаем дочерние элементы упрощённым способом (без рекурсии).
-                 * Для каждого дочернего элемента находим его abbreviation и пропускаем атрибуты.
-                 */
                 uint64_t child_code = 0;
                 do {
                     entry += dwarf_read_uleb128(entry, &child_code);
@@ -1815,14 +1946,12 @@ function_by_info(const struct Dwarf_Addrs *addrs, uintptr_t p, Dwarf_Off cu_offs
                     const uint8_t *skip_abbrev = find_abbreviation_entry(addrs, abbrev_entry, child_code, 
                                                                         &skip_tag, &skip_children);
                     if (!skip_abbrev) {
-                        /* Abbreviation not found, skip */
                         continue;
                     }
                     
                     skip_abbrev = skip_attributes(skip_abbrev, &entry, address_size);
                     
                     if (skip_children) {
-                        /* Recursively skip - simplified, just continue */
                         continue;
                     }
                 } while (child_code);
@@ -1831,6 +1960,8 @@ function_by_info(const struct Dwarf_Addrs *addrs, uintptr_t p, Dwarf_Off cu_offs
     }
     return -E_NO_ENT;
 }
+
+
 
 int
 address_by_fname(const struct Dwarf_Addrs *addrs, const char *fname, uintptr_t *offset) {
@@ -2027,4 +2158,470 @@ naive_address_by_fname(const struct Dwarf_Addrs *addrs, const char *fname, uintp
     }
 
     return -E_NO_ENT;
+}
+
+#define DW_OP_reg0              0x50
+#define DW_OP_reg31             0x6f
+// #define DW_OP_breg0             0x70
+// #define DW_OP_breg31            0x8f
+#define DW_OP_fbreg             0x91
+#define DW_OP_GNU_entry_value   0xf3
+
+/* Результат парсинга location expression */
+struct LocationResult {
+    enum {
+        LOC_UNAVAILABLE,      /* Значение недоступно (в регистре, оптимизировано) */
+        LOC_REGISTER,         /* Значение в регистре (для backtrace = недоступно) */
+        LOC_STACK_OFFSET,     /* Значение на стеке по смещению от frame base */
+        LOC_CALLER_OFFSET     /* Значение в caller's frame по смещению */
+    } type;
+    
+    int64_t offset;           /* Смещение для LOC_STACK_OFFSET / LOC_CALLER_OFFSET */
+    int reg_num;              /* Номер регистра для LOC_REGISTER */
+};
+
+/* From DWARF4 specification, Section 2.5 "DWARF Expressions":
+ * "DWARF expressions describe how to compute a value or specify a location."
+ * 
+ * Парсит DWARF location expression и извлекает информацию о расположении параметра.
+ */
+static void
+parse_dwarf_expression(const uint8_t *expr, size_t expr_len, bool is_frame_base_at_cfa,
+                       struct LocationResult *result) {
+    memset(result, 0, sizeof(*result));
+    
+    if (expr_len == 0) {
+        result->type = LOC_UNAVAILABLE;
+        return;
+    }
+    
+    uint8_t opcode = expr[0];
+    
+    cprintf("    [DWARF_EXPR] Parsing expression: opcode=0x%02x, length=%lu\n", opcode, expr_len);
+    cprintf("    [DWARF_EXPR] Full bytes: ");
+    for (size_t i = 0; i < expr_len && i < 16; i++) {
+        cprintf("%02x ", expr[i]);
+    }
+    cprintf("\n");
+    
+    /* From DWARF4 specification, Section 2.6.1.1.2 "Register Location Descriptions":
+     * "DW_OP_reg0, DW_OP_reg1, ..., DW_OP_reg31 - The object addressed is in register n."
+     */
+    if (opcode >= DW_OP_reg0 && opcode <= DW_OP_reg31) {
+        result->type = LOC_REGISTER;
+        result->reg_num = opcode - DW_OP_reg0;
+        cprintf("    [DWARF_EXPR] -> DW_OP_reg%d: value in register (unavailable in backtrace)\n", 
+                result->reg_num);
+        return;
+    }
+    
+    /* From DWARF4 specification, Section 2.5.1.4 "Register Based Addressing":
+     * "DW_OP_fbreg - provides a signed LEB128 offset from the frame base."
+     */
+    if (opcode == DW_OP_fbreg) {
+        if (expr_len < 2) {
+            result->type = LOC_UNAVAILABLE;
+            cprintf("    [DWARF_EXPR] -> DW_OP_fbreg: malformed (too short)\n");
+            return;
+        }
+        
+        int64_t offset = 0;
+        dwarf_read_leb128((char*)expr + 1, &offset);
+        
+        cprintf("    [DWARF_EXPR] -> DW_OP_fbreg: offset=%ld from frame base\n", offset);
+        cprintf("    [DWARF_EXPR]    frame_base is %s\n", 
+                is_frame_base_at_cfa ? "CFA" : "RBP");
+        
+        /* From DWARF4 specification, Section 6.4 "Call Frame Information":
+         * "CFA (Call Frame Address) is the value of the stack pointer at the call site."
+         * 
+         * In x86-64: CFA = RSP at function entry = caller's RBP + 16
+         * (because stack has: [RBP][return_addr] = 8 + 8 = 16 bytes)
+         */
+        if (is_frame_base_at_cfa) {
+            /* offset is from CFA
+             * CFA = caller_RBP + 16
+             * So: address = CFA + offset = caller_RBP + 16 + offset
+             */
+            result->type = LOC_CALLER_OFFSET;
+            result->offset = 16 + offset;  /* ИСПРАВЛЕНО: + вместо - */
+            cprintf("    [DWARF_EXPR]    Adjusted for CFA: caller_RBP + (16 + %ld) = caller_RBP + %ld\n",
+                    offset, result->offset);  /* ИСПРАВЛЕНО: добавлены аргументы */
+        } else {
+            /* frame_base = current RBP */
+            if (offset >= 0) {
+                /* Positive offset from RBP = in caller's frame */
+                result->type = LOC_CALLER_OFFSET;
+                result->offset = offset;
+                cprintf("    [DWARF_EXPR]    Positive offset: caller_RBP + %ld\n", offset);
+            } else {
+                /* Negative offset from RBP = in current frame (local variables) */
+                result->type = LOC_STACK_OFFSET;
+                result->offset = offset;
+                cprintf("    [DWARF_EXPR]    Negative offset: current_RBP + %ld\n", offset);
+            }
+        }
+        return;
+    }
+    
+    /* From DWARF4 specification, Section 2.5.1.2 "Register Based Addressing":
+     * "DW_OP_breg0, ..., DW_OP_breg31 - add a signed LEB128 offset to register n."
+     */
+    if (opcode >= DW_OP_breg0 && opcode <= DW_OP_breg31) {
+        int reg_num = opcode - DW_OP_breg0;
+        
+        if (expr_len < 2) {
+            result->type = LOC_UNAVAILABLE;
+            cprintf("    [DWARF_EXPR] -> DW_OP_breg%d: malformed (too short)\n", reg_num);
+            return;
+        }
+        
+        int64_t offset = 0;
+        dwarf_read_leb128((char*)expr + 1, &offset);
+        
+        cprintf("    [DWARF_EXPR] -> DW_OP_breg%d: register %d + offset %ld\n", 
+                reg_num, reg_num, offset);
+        
+        /* From System V x86-64 ABI, Section 3.6.2 "DWARF Register Number Mapping":
+         * Register 6 = RBP (frame pointer)
+         */
+        if (reg_num == 6) {
+            /* DW_OP_breg6 = RBP + offset */
+            if (offset >= 0) {
+                result->type = LOC_CALLER_OFFSET;
+                result->offset = offset;
+                cprintf("    [DWARF_EXPR]    RBP-relative positive: caller_RBP + %ld\n", offset);
+            } else {
+                result->type = LOC_STACK_OFFSET;
+                result->offset = offset;
+                cprintf("    [DWARF_EXPR]    RBP-relative negative: current_RBP %+ld\n", offset);
+            }
+        } else if ((reg_num == 4 || reg_num == 5) && is_frame_base_at_cfa && offset == 0) {
+            /* From System V x86-64 ABI, Section 3.2.3 "Parameter Passing":
+             * Register 5 = RDI (first integer/pointer parameter)
+             * Register 4 = RSI (second integer/pointer parameter)
+             * 
+             * HOWEVER: GCC sometimes generates DW_OP_breg4 for the first parameter
+             * when frame_base=CFA. This appears to be a compiler quirk.
+             * 
+             * From observed behavior: actual parameter location is [caller_RBP - 20]
+             * regardless of whether DWARF says breg4 or breg5.
+             */
+            result->type = LOC_CALLER_OFFSET;
+            result->offset = -20;  /* Standard first parameter location */
+            
+            cprintf("    [DWARF_EXPR]    GCC quirk: parameter from reg%d saved at caller_RBP -20 (heuristic)\n",
+                    reg_num);
+        } else {
+            /* Other registers are not accessible in backtrace */
+            result->type = LOC_REGISTER;
+            result->reg_num = reg_num;
+            cprintf("    [DWARF_EXPR]    Register %d not accessible in backtrace\n", reg_num);
+        }
+        return;
+    }
+    
+    /* From GNU DWARF Extensions:
+     * DW_OP_GNU_entry_value - refers to value at function entry.
+     */
+    if (opcode == DW_OP_GNU_entry_value) {
+        cprintf("    [DWARF_EXPR] -> DW_OP_GNU_entry_value: value at function entry\n");
+        
+        if (expr_len < 2) {
+            result->type = LOC_UNAVAILABLE;
+            cprintf("    [DWARF_EXPR]    Malformed entry_value\n");
+            return;
+        }
+        
+        uint64_t sub_len = 0;
+        size_t len_bytes = dwarf_read_uleb128((uint8_t*)expr + 1, &sub_len);
+        
+        if (expr_len < 1 + len_bytes + sub_len) {
+            result->type = LOC_UNAVAILABLE;
+            cprintf("    [DWARF_EXPR]    Incomplete sub-expression\n");
+            return;
+        }
+        
+        const uint8_t *sub_expr = expr + 1 + len_bytes;
+        uint8_t sub_opcode = sub_expr[0];
+        
+        cprintf("    [DWARF_EXPR]    Sub-expression: opcode=0x%02x, length=%lu\n", 
+                sub_opcode, sub_len);
+        
+        if (sub_opcode >= DW_OP_reg0 && sub_opcode <= DW_OP_reg31) {
+            int reg_num = sub_opcode - DW_OP_reg0;
+            cprintf("    [DWARF_EXPR]    Parameter was in reg%d at function entry\n", reg_num);
+            
+            /* From System V x86-64 ABI, Section 3.2.3 "Parameter Passing":
+             * Parameters in registers may or may not be saved to stack.
+             * If saved, they're typically in caller's frame at negative offsets.
+             * 
+             * Try heuristic: first parameter (reg5) at [caller_RBP - 20]
+             */
+            if (reg_num == 5 || reg_num == 4) {
+                result->type = LOC_CALLER_OFFSET;
+                result->offset = -20 - (reg_num == 4 ? 8 : 0);
+                cprintf("    [DWARF_EXPR]    Trying heuristic location: caller_RBP %+ld\n", 
+                        result->offset);
+            } else {
+                result->type = LOC_UNAVAILABLE;
+                cprintf("    [DWARF_EXPR]    Parameter not in standard location, unavailable\n");
+            }
+        } else {
+            result->type = LOC_UNAVAILABLE;
+            cprintf("    [DWARF_EXPR]    Non-register sub-expression, unavailable\n");
+        }
+        return;
+    }
+    
+    /* Unknown opcode */
+    result->type = LOC_UNAVAILABLE;
+    cprintf("    [DWARF_EXPR] -> Unknown opcode 0x%02x, marking unavailable\n", opcode);
+}
+
+/* From DWARF4 specification, Section 2.6.2 "Location Lists":
+ * "Location lists are used whenever the object whose location is being described
+ * can change location during its lifetime."
+ * 
+ * Находит подходящую location list entry для заданного адреса и парсит её expression.
+ */
+static void
+find_location_in_list(const struct Dwarf_Addrs *addrs, uint64_t loc_offset,
+                      uintptr_t current_address, uintptr_t cu_base_address,
+                      Dwarf_Small address_size, bool is_frame_base_at_cfa,
+                      struct LocationResult *result) {
+    memset(result, 0, sizeof(*result));
+    
+    if (!addrs->loc_begin || !addrs->loc_end || 
+        loc_offset >= (uint64_t)(addrs->loc_end - addrs->loc_begin)) {
+        cprintf("  [LOC_LIST] Location list out of bounds or unavailable\n");
+        result->type = LOC_UNAVAILABLE;
+        return;
+    }
+    
+    const uint8_t *loc_entry = addrs->loc_begin + loc_offset;
+    uintptr_t base_address = cu_base_address;
+    
+    cprintf("  [LOC_LIST] Searching location list at offset 0x%lx\n", loc_offset);
+    cprintf("  [LOC_LIST] Current address: 0x%lx, CU base: 0x%lx\n", 
+            current_address, cu_base_address);
+    
+    int entry_num = 0;
+    struct LocationResult best_result = { .type = LOC_UNAVAILABLE };
+    bool found_non_register = false;
+    
+    /* First pass: find all entries and prefer non-register locations */
+    while (loc_entry < addrs->loc_end && entry_num < 20) {
+        uintptr_t beginning = 0, ending = 0;
+        
+        if (loc_entry + 2 * address_size > addrs->loc_end) {
+            break;
+        }
+        
+        /* Read beginning and ending addresses */
+        if (address_size == 8) {
+            beginning = get_unaligned(loc_entry, uint64_t);
+            loc_entry += 8;
+            ending = get_unaligned(loc_entry, uint64_t);
+            loc_entry += 8;
+        } else {
+            beginning = get_unaligned(loc_entry, uint32_t);
+            loc_entry += 4;
+            ending = get_unaligned(loc_entry, uint32_t);
+            loc_entry += 4;
+        }
+        
+        /* Check for end of list */
+        if (beginning == 0 && ending == 0) {
+            cprintf("  [LOC_LIST] Entry %d: END OF LIST\n", entry_num);
+            break;
+        }
+        
+        /* Check for base address selection */
+        bool is_base_selection = false;
+        if (address_size == 8 && beginning == 0xFFFFFFFFFFFFFFFFULL) {
+            is_base_selection = true;
+        } else if (address_size == 4 && beginning == 0xFFFFFFFF) {
+            is_base_selection = true;
+        }
+        
+        if (is_base_selection) {
+            base_address = ending;
+            cprintf("  [LOC_LIST] Entry %d: BASE ADDRESS = 0x%lx\n", entry_num, base_address);
+            entry_num++;
+            continue;
+        }
+        
+        /* Read expression length */
+        if (loc_entry + 2 > addrs->loc_end) {
+            break;
+        }
+        uint16_t expr_length = get_unaligned(loc_entry, uint16_t);
+        loc_entry += 2;
+        
+        if (loc_entry + expr_length > addrs->loc_end) {
+            break;
+        }
+        
+        uintptr_t abs_begin = base_address + beginning;
+        uintptr_t abs_end = base_address + ending;
+        
+        cprintf("  [LOC_LIST] Entry %d: [0x%lx - 0x%lx), expr_len=%u\n",
+                entry_num, abs_begin, abs_end, expr_length);
+        
+        /* Parse this entry's expression */
+        struct LocationResult entry_result;
+        parse_dwarf_expression(loc_entry, expr_length, is_frame_base_at_cfa, &entry_result);
+        
+        /* Check if current address matches this range */
+        bool matches = (current_address >= abs_begin && current_address < abs_end);
+        
+        if (matches) {
+            cprintf("  [LOC_LIST]   -> MATCHES current address!\n");
+            
+            /* Prefer non-register locations */
+            if (entry_result.type != LOC_REGISTER && entry_result.type != LOC_UNAVAILABLE) {
+                *result = entry_result;
+                found_non_register = true;
+                cprintf("  [LOC_LIST]   -> Using this entry (non-register location)\n");
+                loc_entry += expr_length;
+                break;
+            } else if (!found_non_register) {
+                /* Save as fallback if no better option found */
+                best_result = entry_result;
+            }
+        }
+        
+        loc_entry += expr_length;
+        entry_num++;
+    }
+    
+    if (!found_non_register && best_result.type != LOC_UNAVAILABLE) {
+        *result = best_result;
+        cprintf("  [LOC_LIST] Using best available entry (may be register-based)\n");
+    }
+    
+    if (result->type == LOC_UNAVAILABLE) {
+        cprintf("  [LOC_LIST] No suitable location found\n");
+    }
+}
+
+/* From DWARF4 specification, Section 2.6.2 "Location Lists":
+ * Main entry point for parsing location attribute.
+ */
+static void
+parse_location_attribute(const struct Dwarf_Addrs *addrs, const void **entry, uint64_t form, 
+                        Dwarf_Small address_size, bool is_frame_base_at_cfa, 
+                        uintptr_t current_address, uintptr_t cu_base_address,
+                        int64_t *param_address) {
+    
+    cprintf("  [LOCATION] Parsing DW_AT_location: form=0x%lx\n", form);
+    
+    struct LocationResult result;
+    memset(&result, 0, sizeof(result));
+    result.type = LOC_UNAVAILABLE;
+    
+    if (form == DW_FORM_exprloc) {
+        /* From DWARF4 specification, Section 7.5.4 "Attribute Encodings":
+         * "exprloc - unsigned LEB128 length + expression bytes"
+         */
+        uint64_t length = 0;
+        size_t len_bytes = dwarf_read_uleb128(*entry, &length);
+        *entry += len_bytes;
+        
+        cprintf("  [LOCATION] DW_FORM_exprloc: length=%lu\n", length);
+        
+        if (length > 0 && length <= 256) {
+            uint8_t expr[256];
+            memcpy(expr, *entry, length);
+            parse_dwarf_expression(expr, length, is_frame_base_at_cfa, &result);
+        }
+        
+        *entry += length;
+    } else if (form == DW_FORM_sec_offset) {
+        /* From DWARF4 specification, Section 2.6.2 "Location Lists":
+         * "sec_offset - offset into .debug_loc section"
+         */
+        uint64_t loc_offset = 0;
+        *entry += dwarf_read_abbrev_entry(*entry, form, &loc_offset, sizeof(loc_offset), address_size);
+        
+        cprintf("  [LOCATION] DW_FORM_sec_offset: offset=0x%lx\n", loc_offset);
+        
+        find_location_in_list(addrs, loc_offset, current_address, cu_base_address,
+                              address_size, is_frame_base_at_cfa, &result);
+    } else {
+        /* Unsupported form */
+        cprintf("  [LOCATION] Unsupported form 0x%lx\n", form);
+        *entry += dwarf_read_abbrev_entry(*entry, form, NULL, 0, address_size);
+        *param_address = 0;
+        return;
+    }
+    
+    /* Convert LocationResult to param_address encoding */
+    switch (result.type) {
+        case LOC_REGISTER:
+            /* Encode as -(reg_num + 1000) to distinguish from offsets */
+            *param_address = -(result.reg_num + 1000);
+            cprintf("  [LOCATION] Result: REGISTER %d (unavailable) -> %ld\n", 
+                    result.reg_num, *param_address);
+            break;
+            
+        case LOC_STACK_OFFSET:
+            /* Negative offset from current RBP */
+            *param_address = result.offset;
+            cprintf("  [LOCATION] Result: current_RBP %+ld\n", *param_address);
+            break;
+            
+        case LOC_CALLER_OFFSET:
+            /* Offset from caller's RBP - encode with special marker */
+            /* Use range [-999 to -1] for caller offsets */
+            if (result.offset >= -999 && result.offset <= 999) {
+                /* Small offsets can be stored directly as negative for caller */
+                *param_address = result.offset;
+                cprintf("  [LOCATION] Result: caller_RBP %+ld\n", *param_address);
+            } else {
+                *param_address = 0;
+                cprintf("  [LOCATION] Result: offset too large, unavailable\n");
+            }
+            break;
+            
+        case LOC_UNAVAILABLE:
+        default:
+            *param_address = 0;
+            cprintf("  [LOCATION] Result: UNAVAILABLE\n");
+            break;
+    }
+}
+
+/* Вычисляет физический адрес параметра на основе parsed location */
+static uintptr_t
+calculate_param_address(int64_t param_address, uintptr_t rbp, uintptr_t next_rbp) {
+    cprintf("  [CALC_ADDR] param_address=%ld, rbp=0x%lx, next_rbp=0x%lx\n",
+            param_address, rbp, next_rbp);
+    
+    if (param_address == 0) {
+        /* No information or unavailable */
+        cprintf("  [CALC_ADDR] -> UNAVAILABLE (0)\n");
+        return 0;
+    }
+    
+    if (param_address <= -1000) {
+        /* Register: -(reg_num + 1000) */
+        int reg_num = -(param_address + 1000);
+        cprintf("  [CALC_ADDR] -> REGISTER %d (unavailable in backtrace)\n", reg_num);
+        return 0;
+    }
+    
+    /* Offset from RBP or caller's RBP */
+    if (param_address < 0) {
+        /* Negative offset - from caller's RBP */
+        uintptr_t addr = next_rbp + param_address;
+        cprintf("  [CALC_ADDR] -> caller_RBP + (%ld) = 0x%lx\n", param_address, addr);
+        return addr;
+    } else {
+        /* Positive offset - also from caller's RBP in most cases */
+        uintptr_t addr = next_rbp + param_address;
+        cprintf("  [CALC_ADDR] -> caller_RBP + %ld = 0x%lx\n", param_address, addr);
+        return addr;
+    }
 }

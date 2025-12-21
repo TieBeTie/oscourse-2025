@@ -343,6 +343,8 @@
 #define DW_OP_reg5           0x55  /* Register 5 = %rdi (first parameter in x86-64 ABI) */
 #define DW_OP_reg6           0x56
 #define DW_OP_reg31          0x6f  /* Register 31 */
+#define DW_OP_breg0  0x70
+#define DW_OP_breg31 0x8F
 #define DW_OP_breg6          0x76  /* Base register 6 (RBP) + signed LEB128 offset */
 #define DW_OP_fbreg          0x91
 #define DW_OP_call_frame_cfa 0x9c
@@ -577,7 +579,8 @@ dwarf_read_leb128(const char *addr, int64_t *ret) {
 
     /* The number of bits in a signed integer. */
     if (shift < 8 * sizeof(result) && byte & 0x40)
-        result |= (-1U << shift);
+        // result |= (-1U << shift);
+        result |= (~0ULL << shift);
 
     *ret = result;
     return count;

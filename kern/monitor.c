@@ -88,6 +88,43 @@ mon_kerninfo(int argc, char **argv, struct Trapframe *tf) {
 
 static void print_param_value(const struct Dwarf_VarInfo *param, uintptr_t rbp_addr, int64_t offset);
 
+/* From DWARF4 specification, Section 2.6 "Location Descriptions":
+ * "Location descriptions describe how to access objects and compute values."
+ * 
+ * From System V x86-64 ABI, Section 3.2.2 "The Stack Frame":
+ * "The stack grows downwards from high addresses. The end of the input argument area
+ * shall be aligned on a 16 byte boundary."
+ * 
+ * Вычисляет адрес параметра на основе информации из DWARF location description.
+ * Для параметров в регистрах (address < 0) возвращает 0, так как регистры вызывающей
+ * функции недоступны в backtrace. Для параметров на стеке вычисляет адрес относительно
+ * соответствующего frame pointer (rbp или next_rbp).
+ */
+
+static uintptr_t
+calculate_param_address(int64_t dwarf_address, uintptr_t rbp, uintptr_t next_rbp) {
+    /* From DWARF4 specification, Section 2.6.1.1.2 "Register Location Descriptions":
+     * Используем диапазон < -1000 для обозначения регистров, чтобы отличить от смещений.
+     */
+    if (dwarf_address <= -1000) {
+        /* Параметр в регистре: dwarf_address = -(reg_num + 1000) */
+        return 0; /* Недоступно в backtrace */
+    } else if (dwarf_address < 0) {
+        /* From System V x86-64 ABI, Section 3.2.2 "The Stack Frame":
+         * Отрицательное смещение от caller's RBP.
+         * Параметры могут быть сохранены в caller's frame по отрицательным смещениям.
+         */
+        return next_rbp + dwarf_address; /* dwarf_address уже отрицательное */
+    } else if (dwarf_address > 0) {
+        /* Положительное смещение от caller's RBP (стандартные параметры на стеке) */
+        return next_rbp + dwarf_address;
+    } else {
+        /* dwarf_address == 0 - нет информации */
+        return 0;
+    }
+}
+
+/* Updated print_single_parameter using new infrastructure */
 static void
 print_single_parameter(const struct Dwarf_VarInfo *param, uintptr_t rbp, uintptr_t next_rbp, int param_index) {
     if (strlen(param->name) == 0) {
@@ -96,43 +133,27 @@ print_single_parameter(const struct Dwarf_VarInfo *param, uintptr_t rbp, uintptr
         cprintf("%s %s=", param->type_name, param->name);
     }
     
-    /* From System V x86-64 ABI, Section 3.2.3 "Parameter Passing":
-     * Первые 6 целочисленных/указательных параметров передаются через регистры:
-     * %rdi, %rsi, %rdx, %rcx, %r8, %r9. Остальные - через стек.
-     * 
-     * From DWARF4 specification, Section 2.6.1.1.2 "Register Location Descriptions":
-     * Если location expression содержит DW_OP_reg*, параметр находится в регистре.
-     * 
-     * From DWARF4 specification, Section 2.5.1.2 "Register Based Addressing":
-     * "The DW_OP_fbreg operation provides a signed LEB128 offset from the address specified by
-     * the location description in the DW_AT_frame_base attribute of the current function."
-     * 
-     * Если location list указывает на регистр (param->address < 0), параметр находится в регистре
-     * вызывающей функции, и мы не можем его прочитать из стека напрямую. В этом случае пытаемся
-     * прочитать из стандартного места, где функция могла сохранить регистр (хотя это не гарантировано).
-     * 
-     * Если location list недоступна (param->address == 0), используем fallback на стандартные
-     * смещения из System V x86-64 ABI для параметров, передаваемых через стек.
-     */
-    int64_t offset;
-    uintptr_t base_rbp;
+    cprintf("\n[PARAM %d] name='%s', type='%s', kind=%d, address=%ld\n",
+            param_index, param->name, param->type_name, param->kind, param->address);
+    
     if (param->address == 0) {
-        /* Fallback на стандартные смещения из ABI - параметры в стеке вызывающей функции.
-         * Но это работает только для параметров, передаваемых через стек (7-й и далее). */
-        offset = 16 + param_index * 8;
-        base_rbp = next_rbp;  /* Параметры находятся в стеке вызывающей функции */
-    } else {
-        /* Используем смещение из DWARF location list */
-        offset = param->address;
-        /* DW_OP_breg6 и DW_OP_fbreg дают смещение от текущего RBP функции */
-        /* Для параметров функции они обычно указывают на локальные переменные/параметры
-         * относительно текущего фрейма, но в x86-64 ABI параметры находятся в стеке вызывающей функции.
-         * Однако, если DWARF указывает offset от текущего RBP, используем текущий RBP. */
-        base_rbp = rbp;  /* Смещение от текущего RBP */
+        cprintf("[PARAM %d] No location information\n", param_index);
+        cprintf("?");
+        return;
     }
     
-    print_param_value(param, base_rbp, offset);
+    uintptr_t param_addr = calculate_param_address(param->address, rbp, next_rbp);
+    
+    if (param_addr == 0) {
+        cprintf("[PARAM %d] Parameter unavailable (in register or optimized out)\n", param_index);
+        cprintf("?");
+        return;
+    }
+    
+    cprintf("[PARAM %d] Reading value from address 0x%lx\n", param_index, param_addr);
+    print_param_value(param, param_addr, 0);
 }
+
 
 static void
 print_function_parameters(const struct Ripdebuginfo *info, uintptr_t rbp, uintptr_t next_rbp) {
@@ -160,26 +181,14 @@ print_function_info(uintptr_t rip, const struct Ripdebuginfo *info, uintptr_t rb
     
     cprintf(") at %s:%d\n", info->rip_file, info->rip_line);
 }
-
+/* From DWARF4 specification, Section 5.1 "Base Type Entries":
+ * "A base type entry has a DW_AT_byte_size attribute whose value is a constant
+ * containing the size in bytes of the storage unit used to represent an object of the given type."
+ */
 static void
-print_param_value(const struct Dwarf_VarInfo *param, uintptr_t rbp_addr, int64_t offset) {
-    /* From System V x86-64 ABI, Section 3.2.2 "The Stack Frame":
-     * Parameters are passed on the stack in the caller's frame.
-     * 
-     * Вычисляем адрес параметра в стеке: базовый адрес (rbp_addr) + смещение (offset).
-     * rbp_addr - это RBP вызывающей функции (next_rbp), где находятся параметры текущей функции.
-     * Это соответствует тому, что параметры функции находятся в стековом фрейме вызывающей функции,
-     * а не в текущем фрейме.
-     */
-    uintptr_t param_addr = rbp_addr + offset;
+print_param_value(const struct Dwarf_VarInfo *param, uintptr_t param_addr, int64_t offset) {
+    (void)offset; /* Unused, kept for interface compatibility */
     
-    /* From DWARF4 specification, Section 5.1 "Base Type Entries":
-     * "A base type is represented by a debugging information entry with the tag DW_TAG_base_type.
-     * A base type entry has a DW_AT_encoding attribute describing how the base type is encoded
-     * and is to be interpreted."
-     * 
-     * Поддерживаем только три типа: int, string (char*), pointer (void*).
-     */
     if (param->kind == KIND_SIGNED_INT) {
         switch (param->byte_size) {
         case 1:
@@ -199,12 +208,6 @@ print_param_value(const struct Dwarf_VarInfo *param, uintptr_t rbp_addr, int64_t
             break;
         }
     } else if (param->kind == KIND_STRING) {
-        /* From DWARF4 specification, Section 5.2 "Modified Type Entries":
-         * "A modified type entry describing a pointer or reference type..."
-         * 
-         * Строки (char*) читаются из памяти по указателю и выводятся как null-terminated строки.
-         * Ограничиваем длину для безопасности.
-         */
         uintptr_t str_ptr = *(uintptr_t *)param_addr;
         if (str_ptr == 0) {
             cprintf("NULL");
@@ -228,72 +231,34 @@ print_param_value(const struct Dwarf_VarInfo *param, uintptr_t rbp_addr, int64_t
             cprintf("\"");
         }
     } else if (param->kind == KIND_POINTER) {
-        /* From DWARF4 specification, Section 5.2 "Modified Type Entries":
-         * "A modified type entry describing a pointer or reference type..."
-         * 
-         * Указатели выводятся в шестнадцатеричном формате как адреса памяти.
-         */
         uintptr_t ptr_val = *(uintptr_t *)param_addr;
         cprintf("0x%08lx", ptr_val);
     } else {
-        /* Неизвестный тип - выводим "?" */
         cprintf("?");
     }
 }
 
+
 int
 mon_backtrace(int argc, char **argv, struct Trapframe *tf) {
-    // LAB 2: Your code here
-    /* From docs/lab2_description.txt:
-     * "Функция трассировки должна отображать данные в следующем формате:
-     * Stack backtrace:
-     *   rbp 0000008041616f00  rip 00000080416041ef"
-   */
     cprintf("Stack backtrace:\n");
 
     struct Ripdebuginfo info = { 0 };
-    /* From docs/lab2_description.txt:
-    * "Читаем текущее значение регистра RBP с помощью функции read_rbp(). RBP указывает
-     * на адрес в стеке, где сохранён предыдущий RBP. Это позволяет нам обойти стек, следуя цепочке
-     * сохранённых указателей RBP согласно соглашению о вызовах x86-64.
-     */
     uint64_t rbp = read_rbp();
 
-    /* From docs/lab2_description.txt, lines 81-82:
-     * "Первая строка соответствует выполняемой в данный момент функции (mon_backtrace), вторая —
-     * функции, которая вызвала mon_backtrace и так далее. Изучив файл kern/entry.S, вы найдете
-     * простой способ определить момент, когда нужно остановиться."
-     * 
-     * From kern/entry.S, line 16:
-     * "xor %ebp, %ebp"
-     * 
-     * В entry.S начальный RBP устанавливается в 0 (xor %ebp, %ebp). Поэтому цикл
-     * продолжается, пока rbp != 0. Когда мы достигаем начального фрейма (rbp == 0), это означает,
-     * что мы дошли до точки входа в ядро, и нужно остановиться. Это стандартный способ определения
-     * конца цепочки стековых фреймов в x86-64.
-     */
     while (rbp != 0) {
-        /* From System V x86-64 ABI, Section 3.2.2 "The Stack Frame", Figure 3.3:
-         * "PositionContentsFrame
-         * 0(%rbp)previous%rbpvalue
-         * 8(%rbp)return address"
-         * 
-         * From docs/lab2_description.txt, lines 63-64:
-         * "| saved %rbp  | ниже черты стек вызываемой функции
-         * %rbp -> +-------------+"
-         * 
-         * В x86-64 стековый фрейм имеет следующую структуру: по адресу [rbp] находится
-         * сохранённое значение предыдущего RBP (указатель на фрейм вызывающей функции), а по адресу
-         * [rbp+8] находится адрес возврата (RIP). Преобразуем rbp в указатель на uint64_t, чтобы
-         * прочитать эти значения из стека согласно структуре фрейма из System V ABI.
-         */
         uint64_t *rbp_ptr = (uint64_t *)rbp;
         uint64_t next_rbp = rbp_ptr[0];
         uint64_t rip = rbp_ptr[1];
 
+        // Сначала выводим адреса
         cprintf("  rbp %016lx  rip %016lx\n", rbp, rip);
 
+        // Затем получаем debug информацию для RIP
         if (debuginfo_rip(rip, &info) == 0) {
+            // ВАЖНО: параметры функции находятся в ТЕКУЩЕМ фрейме (rbp),
+            // а не в следующем! Но для функций с параметрами через регистры
+            // нужно искать их сохраненные значения.
             print_function_info(rip, &info, rbp, next_rbp);
         } else {
             cprintf("    %s:%d: %.*s+%ld\n",
@@ -377,18 +342,22 @@ mon_memory(int argc, char **argv, struct Trapframe *tf) {
 /* Test signed integer */
 void test_signed_int(int32_t a) {
     (void)a;
+    cprintf("pointer: %p\n", &a);
+    cprintf("to int: %lld\n", (long long)&a);
     mon_backtrace(0, NULL, NULL);
 }
 
 /* Test pointer */
 void test_pointer(void *ptr) {
     (void)ptr;
+    cprintf("pointer: %p\n", ptr);
     mon_backtrace(0, NULL, NULL);
 }
 
 /* Test string */
 void test_string(const char *str) {
     (void)str;
+    cprintf("str: %s\n", str);
     mon_backtrace(0, NULL, NULL);
 }
 
@@ -396,7 +365,7 @@ void test_string(const char *str) {
 int
 mon_test_signed(int argc, char **argv, struct Trapframe *tf) {
     (void)argc; (void)argv; (void)tf;
-    test_signed_int(-123456);
+    test_signed_int(777);
     return 0;
 }
 
