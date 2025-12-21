@@ -33,9 +33,7 @@ int mon_frequency(int argc, char **argv, struct Trapframe *tf);
 int mon_memory(int argc, char **argv, struct Trapframe *tf);
 int mon_hello(int argc, char **argv, struct Trapframe *tf);
 int mon_test_signed(int argc, char **argv, struct Trapframe *tf);
-int mon_test_unsigned(int argc, char **argv, struct Trapframe *tf);
 int mon_test_ptr(int argc, char **argv, struct Trapframe *tf);
-int mon_test_multi(int argc, char **argv, struct Trapframe *tf);
 int mon_test_string(int argc, char **argv, struct Trapframe *tf);
 int mon_test_all(int argc, char **argv, struct Trapframe *tf);
 int mon_quit(int argc, char **argv, struct Trapframe *tf);
@@ -58,9 +56,7 @@ static struct Command commands[] = {
         {"memory", "Display free memory pages", mon_memory},
         {"hello", "Print a greeting message", mon_hello},
         {"test_signed", "Test signed int parameter", mon_test_signed},
-        {"test_unsigned", "Test unsigned int parameter", mon_test_unsigned},
         {"test_ptr", "Test pointer parameter", mon_test_ptr},
-        {"test_multi", "Test multiple parameters", mon_test_multi},
         {"test_string", "Test string parameter", mon_test_string},
         {"test_all", "Run all parameter tests", mon_test_all},
         {"quit", "Exit monitor", mon_quit},
@@ -94,18 +90,6 @@ static void print_param_value(const struct Dwarf_VarInfo *param, uintptr_t rbp_a
 
 static void
 print_single_parameter(const struct Dwarf_VarInfo *param, uintptr_t rbp, uintptr_t next_rbp, int param_index) {
-    /* From DWARF4 specification, Section 3.3.4 "Declarations Owned by Subroutines and Entry Points":
-     * "The unspecified parameters of a variable parameter list are represented by a debugging
-     * information entry with the tag DW_TAG_unspecified_parameters."
-     * 
-     * Для variadic-параметров выводим "...", так как их значения не могут быть прочитаны
-     * из стека (количество и типы неизвестны).
-     */
-    if (param->is_variadic) {
-        cprintf("...");
-        return;
-    }
-    
     if (strlen(param->name) == 0) {
         cprintf("%s=", param->type_name);
     } else {
@@ -179,18 +163,6 @@ print_function_info(uintptr_t rip, const struct Ripdebuginfo *info, uintptr_t rb
 
 static void
 print_param_value(const struct Dwarf_VarInfo *param, uintptr_t rbp_addr, int64_t offset) {
-    /* From DWARF4 specification, Section 3.3.4 "Declarations Owned by Subroutines and Entry Points":
-     * "The unspecified parameters of a variable parameter list are represented by a debugging
-     * information entry with the tag DW_TAG_unspecified_parameters."
-     * 
-     * Для variadic-параметров выводим "...", так как их значения не могут быть прочитаны
-     * из стека (количество и типы неизвестны).
-     */
-    if (param->is_variadic) {
-        cprintf("...");
-        return;
-    }
-
     /* From System V x86-64 ABI, Section 3.2.2 "The Stack Frame":
      * Parameters are passed on the stack in the caller's frame.
      * 
@@ -206,13 +178,7 @@ print_param_value(const struct Dwarf_VarInfo *param, uintptr_t rbp_addr, int64_t
      * A base type entry has a DW_AT_encoding attribute describing how the base type is encoded
      * and is to be interpreted."
      * 
-     * From DWARF4 specification, Figure 13 "Encoding attribute values":
-     * "DW_ATE_signed signed binary integer"
-     * "DW_ATE_unsigned unsigned binary integer"
-     * 
-     * Для корректного вывода значений параметров необходимо различать виды типов.
-     * Для минимальной версии поддерживаем только базовые типы и указатели:
-     * KIND_SIGNED_INT, KIND_UNSIGNED_INT, KIND_POINTER.
+     * Поддерживаем только три типа: int, string (char*), pointer (void*).
      */
     if (param->kind == KIND_SIGNED_INT) {
         switch (param->byte_size) {
@@ -232,32 +198,6 @@ print_param_value(const struct Dwarf_VarInfo *param, uintptr_t rbp_addr, int64_t
             cprintf("?");
             break;
         }
-    } else if (param->kind == KIND_UNSIGNED_INT) {
-        switch (param->byte_size) {
-        case 1:
-            cprintf("%u", *(uint8_t *)param_addr);
-            break;
-        case 2:
-            cprintf("%u", *(uint16_t *)param_addr);
-            break;
-        case 4:
-            cprintf("%u", *(uint32_t *)param_addr);
-            break;
-        case 8:
-            cprintf("%lu", *(uint64_t *)param_addr);
-            break;
-        default:
-            cprintf("?");
-            break;
-        }
-    /* From DWARF4 specification, Section 5.2 "Modified Type Entries":
-     * "A modified type entry describing a pointer or reference type (using DW_TAG_pointer_type,
-     * DW_TAG_reference_type or DW_TAG_rvalue_reference_type) may have a
-     * DW_AT_address_class attribute to describe how objects having the given pointer or reference
-     * type ought to be dereferenced."
-     * 
-     * Указатели выводятся в шестнадцатеричном формате как адреса памяти.
-     */
     } else if (param->kind == KIND_STRING) {
         /* From DWARF4 specification, Section 5.2 "Modified Type Entries":
          * "A modified type entry describing a pointer or reference type..."
@@ -288,16 +228,16 @@ print_param_value(const struct Dwarf_VarInfo *param, uintptr_t rbp_addr, int64_t
             cprintf("\"");
         }
     } else if (param->kind == KIND_POINTER) {
+        /* From DWARF4 specification, Section 5.2 "Modified Type Entries":
+         * "A modified type entry describing a pointer or reference type..."
+         * 
+         * Указатели выводятся в шестнадцатеричном формате как адреса памяти.
+         */
         uintptr_t ptr_val = *(uintptr_t *)param_addr;
         cprintf("0x%08lx", ptr_val);
     } else {
-        /* Неизвестный тип - выводим как hex dump.
-         * Для минимальной версии не поддерживаем структуры, массивы и другие сложные типы.
-         */
-        cprintf("0x");
-        for (int i = param->byte_size - 1; i >= 0; i--) {
-            cprintf("%02x", ((uint8_t *)param_addr)[i]);
-        }
+        /* Неизвестный тип - выводим "?" */
+        cprintf("?");
     }
 }
 
@@ -440,21 +380,9 @@ void test_signed_int(int32_t a) {
     mon_backtrace(0, NULL, NULL);
 }
 
-/* Test unsigned integer */
-void test_unsigned_int(uint32_t a) {
-    (void)a;
-    mon_backtrace(0, NULL, NULL);
-}
-
 /* Test pointer */
 void test_pointer(void *ptr) {
     (void)ptr;
-    mon_backtrace(0, NULL, NULL);
-}
-
-/* Test multiple parameters */
-void test_multiple_params(int32_t a, uint32_t b, void *c) {
-    (void)a; (void)b; (void)c;
     mon_backtrace(0, NULL, NULL);
 }
 
@@ -473,23 +401,9 @@ mon_test_signed(int argc, char **argv, struct Trapframe *tf) {
 }
 
 int
-mon_test_unsigned(int argc, char **argv, struct Trapframe *tf) {
-    (void)argc; (void)argv; (void)tf;
-    test_unsigned_int(123456);
-    return 0;
-}
-
-int
 mon_test_ptr(int argc, char **argv, struct Trapframe *tf) {
     (void)argc; (void)argv; (void)tf;
     test_pointer((void *)0x12345678);
-    return 0;
-}
-
-int
-mon_test_multi(int argc, char **argv, struct Trapframe *tf) {
-    (void)argc; (void)argv; (void)tf;
-    test_multiple_params(-100, 200, (void *)0xABCDEF00);
     return 0;
 }
 
@@ -511,16 +425,8 @@ mon_test_all(int argc, char **argv, struct Trapframe *tf) {
     test_signed_int(-123456);
     cprintf("\n");
     
-    cprintf("--- Test unsigned int ---\n");
-    test_unsigned_int(123456);
-    cprintf("\n");
-    
     cprintf("--- Test pointer ---\n");
     test_pointer((void *)0x12345678);
-    cprintf("\n");
-    
-    cprintf("--- Test multiple parameters ---\n");
-    test_multiple_params(-100, 200, (void *)0xABCDEF00);
     cprintf("\n");
     
     cprintf("--- Test string ---\n");

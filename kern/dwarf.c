@@ -673,14 +673,9 @@ parse_base_type_info(const struct Dwarf_Addrs *addrs, Dwarf_Off cu_offset,
                 strncpy(param->type_name, "int", sizeof(param->type_name));
             }
         } else if (data.encoding == DW_ATE_unsigned || data.encoding == DW_ATE_unsigned_char) {
-            param->kind = KIND_UNSIGNED_INT;
-            if (data.byte_size == 8) {
-                strncpy(param->type_name, "uint64_t", sizeof(param->type_name));
-            } else if (data.byte_size == 4) {
-                strncpy(param->type_name, "unsigned int", sizeof(param->type_name));
-            } else {
-                strncpy(param->type_name, "unsigned int", sizeof(param->type_name));
-            }
+            /* Unsigned типы не поддерживаются, устанавливаем как неизвестный */
+            set_unknown_type(param);
+            return;
         } else {
             set_unknown_type(param);
             return;
@@ -690,7 +685,8 @@ parse_base_type_info(const struct Dwarf_Addrs *addrs, Dwarf_Off cu_offset,
         if (data.encoding == DW_ATE_signed || data.encoding == DW_ATE_signed_char) {
             param->kind = KIND_SIGNED_INT;
         } else if (data.encoding == DW_ATE_unsigned || data.encoding == DW_ATE_unsigned_char) {
-            param->kind = KIND_UNSIGNED_INT;
+            /* Unsigned типы не поддерживаются, устанавливаем как неизвестный */
+            set_unknown_type(param);
         } else {
             set_unknown_type(param);
         }
@@ -1709,37 +1705,7 @@ function_by_info(const struct Dwarf_Addrs *addrs, uintptr_t p, Dwarf_Off cu_offs
                 parse_formal_parameter(addrs, cu_offset, abbrev_entry, curr_abbrev_entry, &entry, 
                                       address_size, is_frame_base_at_cfa, p, cu_base_address, param);
                 (*nparams)++;
-            /* From DWARF4 specification, Section 3.3.4 "Declarations Owned by Subroutines and Entry Points":
-             * "The unspecified parameters of a variable parameter list are represented by a debugging
-             * information entry with the tag DW_TAG_unspecified_parameters."
-             * 
-             * Тег DW_TAG_unspecified_parameters означает наличие variadic-аргументов (...)
-             * в сигнатуре функции согласно DWARF4. Для таких параметров создаём запись с is_variadic = 1
-             * и именем "...". Значения variadic-аргументов не выводятся, так как их количество
-             * и типы неизвестны на этапе компиляции, что соответствует требованию спецификации.
-             */
-            } else if (tag == DW_TAG_unspecified_parameters && params && nparams && *nparams < DWARF_MAXPARAMS) {
-                /* From DWARF4 specification, Section 3.3.4 "Declarations Owned by Subroutines and Entry Points":
-                 * "The unspecified parameters of a variable parameter list are represented by a debugging
-                 * information entry with the tag DW_TAG_unspecified_parameters."
-                 * 
-                 * Пропускаем атрибуты variadic-параметра и создаём запись для него.
-                 * Variadic-параметры не имеют конкретных типов и имён, поэтому создаём специальную запись.
-                 */
-                curr_abbrev_entry = skip_attributes(curr_abbrev_entry, &entry, address_size);
-
-                struct Dwarf_VarInfo *param = &params[*nparams];
-                memset(param, 0, sizeof(*param));
-                /* Устанавливаем имя "..." для variadic-параметра согласно DWARF4.
-                 * Поле is_variadic = 1 указывает, что это variadic-параметр функции.
-                 * Значения не выводятся, поэтому размер не нужен (byte_size = 0).
-                 */
-                strncpy(param->name, "...", sizeof(param->name));
-                strncpy(param->type_name, UNKNOWN_TYPE, sizeof(param->type_name));
-                param->is_variadic = 1;
-                param->kind = KIND_UNKNOWN;
-                param->byte_size = 0;
-                (*nparams)++;
+            /* Variadic параметры не поддерживаются - пропускаем */
             } else if (tag == DW_TAG_lexical_block || tag == 0) {
                 /* From DWARF4 specification, Section 2.3 "Relationship of Debugging Information Entries":
                  * "A lexical block entry may have child entries representing nested blocks or declarations."

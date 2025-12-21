@@ -42,7 +42,7 @@ int
 debuginfo_rip(uintptr_t addr, struct Ripdebuginfo *info) {
     if (!addr) return 0;
 
-    /* Initialize *info */
+    /* Default initialization of *info */
     strcpy(info->rip_file, UNKNOWN);
     strcpy(info->rip_fn_name, UNKNOWN);
     info->rip_fn_namelen = sizeof UNKNOWN - 1;
