@@ -25,6 +25,8 @@ load_kernel_dwarf_info(struct Dwarf_Addrs *addrs) {
     addrs->pubnames_end = (uint8_t *)(uefi_lp->DebugPubnamesEnd);
     addrs->pubtypes_begin = (uint8_t *)(uefi_lp->DebugPubtypesStart);
     addrs->pubtypes_end = (uint8_t *)(uefi_lp->DebugPubtypesEnd);
+    addrs->loc_begin = (uint8_t *)(uefi_lp->DebugLocStart);
+    addrs->loc_end = (uint8_t *)(uefi_lp->DebugLocEnd);
 }
 
 #define UNKNOWN       "<unknown>"
@@ -78,7 +80,7 @@ debuginfo_rip(uintptr_t addr, struct Ripdebuginfo *info) {
      * string returned by function_by_info will always be */
 
     // LAB 2: Your res here:
-    res = function_by_info(&addrs, addr - CALL_INSN_LEN, offset, &tmp_buf, &info->rip_fn_addr);
+    res = function_by_info(&addrs, addr - CALL_INSN_LEN, offset, &tmp_buf, &info->rip_fn_addr, info->rip_fn_params, &info->rip_fn_narg);
     if (res < 0) goto error;
     strncpy(info->rip_fn_name, tmp_buf, sizeof(info->rip_fn_name));
     info->rip_fn_namelen = strnlen(info->rip_fn_name, sizeof(info->rip_fn_name));

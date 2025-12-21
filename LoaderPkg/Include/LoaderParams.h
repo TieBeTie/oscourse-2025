@@ -53,6 +53,8 @@ typedef struct {
   EFI_PHYSICAL_ADDRESS     DebugPubnamesEnd;
   EFI_PHYSICAL_ADDRESS     DebugPubtypesStart;
   EFI_PHYSICAL_ADDRESS     DebugPubtypesEnd;
+  EFI_PHYSICAL_ADDRESS     DebugLocStart;
+  EFI_PHYSICAL_ADDRESS     DebugLocEnd;
 
   ///
   /// Kernel symbols
