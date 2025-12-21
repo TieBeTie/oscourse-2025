@@ -488,6 +488,110 @@ resolve_type_entry(const struct Dwarf_Addrs *addrs, Dwarf_Off cu_offset,
     return type_abbrev_entry;
 }
 
+/* Структура для передачи данных в callback для разыменования типа через DW_AT_type */
+struct resolve_type_data {
+    const struct Dwarf_Addrs *addrs;
+    Dwarf_Off cu_offset;
+    const uint8_t *abbrev_table_begin;
+    Dwarf_Small address_size;
+    const void *next_entry;
+    const uint8_t *next_abbrev;
+    uint64_t next_tag;
+    Dwarf_Small next_has_children;
+    int found;
+};
+
+/* Callback для поиска и разыменования атрибута DW_AT_type */
+static int
+handle_type_attribute(const struct Dwarf_Addrs *addrs,
+                      uint64_t attr_name,
+                      uint64_t attr_form,
+                      const void **entry_ptr,
+                      Dwarf_Small address_size,
+                      Dwarf_Off cu_offset,
+                      const uint8_t *abbrev_table_begin,
+                      void *user_data) {
+    struct resolve_type_data *data = (struct resolve_type_data *)user_data;
+    
+    if (attr_name == DW_AT_type) {
+        const void *entry_copy = *entry_ptr;
+        data->next_abbrev = resolve_type_entry(
+            data->addrs, data->cu_offset, data->abbrev_table_begin,
+            &entry_copy, attr_form, data->address_size,
+            &data->next_entry, &data->next_tag, &data->next_has_children);
+        *entry_ptr = entry_copy;
+        data->found = 1;
+        return 1;
+    }
+    return 0; /* Пропустить автоматически */
+}
+
+/* From DWARF4 specification, Section 5.3 "Typedef Entries":
+ * "The typedef entry may also contain a DW_AT_type attribute whose value is a reference to the
+ * type named by the typedef."
+ * 
+ * From DWARF4 specification, Section 5.2 "Modified Type Entries":
+ * "Each of the type modifier entries has a DW_AT_type attribute, whose value is a reference to a
+ * debugging information entry describing a base type, a user-defined type or another type modifier."
+ * 
+ * Разыменовывает typedef и модификаторы типов (const, volatile, restrict) рекурсивно
+ * до базового типа, указателя или структуры. Возвращает финальный тип через out параметры.
+ */
+static void
+resolve_final_type(const struct Dwarf_Addrs *addrs, Dwarf_Off cu_offset,
+                   const uint8_t *abbrev_table_begin, Dwarf_Small address_size,
+                   const void *type_entry, const uint8_t *type_abbrev_entry,
+                   uint64_t type_tag, Dwarf_Small type_has_children,
+                   const void **out_final_entry, const uint8_t **out_final_abbrev,
+                   uint64_t *out_final_tag, Dwarf_Small *out_final_has_children) {
+    const void *current_entry = type_entry;
+    const uint8_t *current_abbrev = type_abbrev_entry;
+    uint64_t current_tag = type_tag;
+    Dwarf_Small current_has_children = type_has_children;
+    int depth = 0;  /* Защита от бесконечной рекурсии */
+    
+    while (depth < 16 && (current_tag == DW_TAG_typedef || 
+                          current_tag == DW_TAG_const_type || 
+                          current_tag == DW_TAG_volatile_type || 
+                          current_tag == DW_TAG_restrict_type)) {
+        /* Ищем атрибут DW_AT_type для разыменования, используя parse_attributes */
+        struct resolve_type_data data = {
+            .addrs = addrs,
+            .cu_offset = cu_offset,
+            .abbrev_table_begin = abbrev_table_begin,
+            .address_size = address_size,
+            .found = 0
+        };
+        
+        const void *entry_copy = current_entry;
+        const uint8_t *abbrev_copy = current_abbrev;
+        parse_attributes(abbrev_copy, &entry_copy, address_size, handle_type_attribute,
+                        addrs, cu_offset, abbrev_table_begin, &data);
+        
+        if (!data.found || !data.next_abbrev) {
+            /* Не нашли DW_AT_type или не удалось разыменовать - возвращаем текущий тип */
+            *out_final_entry = current_entry;
+            *out_final_abbrev = current_abbrev;
+            *out_final_tag = current_tag;
+            *out_final_has_children = current_has_children;
+            return;
+        }
+        
+        /* Переходим к следующему типу */
+        current_entry = data.next_entry;
+        current_abbrev = data.next_abbrev;
+        current_tag = data.next_tag;
+        current_has_children = data.next_has_children;
+        depth++;
+    }
+    
+    /* Достигли финального типа (базового типа, указателя или структуры) */
+    *out_final_entry = current_entry;
+    *out_final_abbrev = current_abbrev;
+    *out_final_tag = current_tag;
+    *out_final_has_children = current_has_children;
+}
+
 /* Структура для передачи данных в callback для парсинга базового типа */
 struct parse_base_type_data {
     uint64_t encoding;
@@ -676,6 +780,37 @@ struct check_char_pointer_data {
     const uint8_t *abbrev_table_begin;
 };
 
+/* Структура для передачи данных в callback для проверки encoding базового типа */
+struct check_char_encoding_data {
+    uint64_t encoding;
+    uint8_t byte_size;
+};
+
+/* Callback для чтения encoding и byte_size базового типа */
+static int
+handle_char_check_encoding_attribute(const struct Dwarf_Addrs *addrs,
+                                     uint64_t attr_name,
+                                     uint64_t attr_form,
+                                     const void **entry_ptr,
+                                     Dwarf_Small address_size,
+                                     Dwarf_Off cu_offset,
+                                     const uint8_t *abbrev_table_begin,
+                                     void *user_data) {
+    struct check_char_encoding_data *data = (struct check_char_encoding_data *)user_data;
+    (void)addrs; (void)cu_offset; (void)abbrev_table_begin;
+    
+    if (attr_name == DW_AT_encoding) {
+        *entry_ptr += dwarf_read_abbrev_entry(*entry_ptr, attr_form, 
+                                              &data->encoding, sizeof(data->encoding), address_size);
+        return 1;
+    } else if (attr_name == DW_AT_byte_size) {
+        *entry_ptr += dwarf_read_abbrev_entry(*entry_ptr, attr_form, 
+                                              &data->byte_size, sizeof(data->byte_size), address_size);
+        return 1;
+    }
+    return 0;
+}
+
 /* Callback для обработки DW_AT_type атрибута указателя */
 static int
 handle_pointer_type_attribute(const struct Dwarf_Addrs *addrs,
@@ -699,13 +834,51 @@ handle_pointer_type_attribute(const struct Dwarf_Addrs *addrs,
             &entry_copy, attr_form, address_size, &pointed_type_entry, 
             &pointed_type_tag, &pointed_type_has_children);
         
-        if (pointed_type_abbrev && pointed_type_tag == DW_TAG_base_type) {
-            /* Проверяем, что это char */
+        /* From DWARF4 specification, Section 5.2 "Type Modifier Entries":
+         * "When multiple type modifiers are chained together to modify a base or user-defined type..."
+         * 
+         * Нужно разыменовывать модификаторы типа (const, volatile) до базового типа.
+         * Например, const char* представлен как: pointer_type → const_type → base_type(char)
+         */
+        const void *final_type_entry = pointed_type_entry;
+        const uint8_t *final_type_abbrev = pointed_type_abbrev;
+        uint64_t final_type_tag = pointed_type_tag;
+        Dwarf_Small final_type_has_children = pointed_type_has_children;
+        
+        /* Разыменовываем модификаторы типа и typedef до базового типа */
+        resolve_final_type(data->addrs, data->cu_offset, data->abbrev_table_begin,
+                          address_size, pointed_type_entry, pointed_type_abbrev,
+                          pointed_type_tag, pointed_type_has_children,
+                          &final_type_entry, &final_type_abbrev,
+                          &final_type_tag, &final_type_has_children);
+        
+        if (final_type_abbrev && final_type_tag == DW_TAG_base_type) {
+            /* Проверяем, что это char - сначала по имени, потом по encoding */
             char type_name_buf[256];
-            if (get_base_type_name(data->addrs, pointed_type_abbrev,
-                                  pointed_type_entry, address_size,
+            bool found_by_name = false;
+            
+            if (get_base_type_name(data->addrs, final_type_abbrev,
+                                  final_type_entry, address_size,
                                   type_name_buf, sizeof(type_name_buf))) {
                 if (strcmp(type_name_buf, "char") == 0) {
+                    data->is_char_pointer = true;
+                    found_by_name = true;
+                }
+            }
+            
+            /* Если не нашли по имени, проверяем по encoding и размеру */
+            if (!found_by_name) {
+                struct check_char_encoding_data encoding_data = { .encoding = 0, .byte_size = 0 };
+                const void *encoding_entry_copy = final_type_entry;
+                const uint8_t *encoding_abbrev_copy = final_type_abbrev;
+                parse_attributes(encoding_abbrev_copy, &encoding_entry_copy, address_size,
+                               handle_char_check_encoding_attribute,
+                               addrs, cu_offset, data->abbrev_table_begin, &encoding_data);
+                
+                /* char определяется как signed_char/unsigned_char с размером 1 байт */
+                if ((encoding_data.encoding == DW_ATE_signed_char || 
+                     encoding_data.encoding == DW_ATE_unsigned_char) &&
+                    encoding_data.byte_size == 1) {
                     data->is_char_pointer = true;
                 }
             }
@@ -1043,13 +1216,23 @@ parse_parameter_type(const struct Dwarf_Addrs *addrs, Dwarf_Off cu_offset,
         return;
     }
     
-    if (type_tag == DW_TAG_pointer_type) {
+    /* Разыменовываем typedef и модификаторы типов до финального типа */
+    const void *final_entry = NULL;
+    const uint8_t *final_abbrev = NULL;
+    uint64_t final_tag = 0;
+    Dwarf_Small final_has_children = 0;
+    resolve_final_type(addrs, cu_offset, abbrev_table_begin, address_size,
+                      type_entry, type_abbrev_entry, type_tag, type_has_children,
+                      &final_entry, &final_abbrev, &final_tag, &final_has_children);
+    
+    /* Обрабатываем финальный тип после разыменования */
+    if (final_tag == DW_TAG_pointer_type) {
         handle_pointer_type(addrs, cu_offset, abbrev_table_begin,
-                           type_abbrev_entry, type_entry, address_size, param);
-    } else if (type_tag == DW_TAG_structure_type || type_tag == DW_TAG_class_type || type_tag == DW_TAG_union_type) {
-        handle_structure_type(type_abbrev_entry, type_entry, address_size, param);
-    } else if (type_tag == DW_TAG_base_type) {
-        parse_base_type_info(addrs, cu_offset, type_abbrev_entry, type_entry, 
+                           final_abbrev, final_entry, address_size, param);
+    } else if (final_tag == DW_TAG_structure_type || final_tag == DW_TAG_class_type || final_tag == DW_TAG_union_type) {
+        handle_structure_type(final_abbrev, final_entry, address_size, param);
+    } else if (final_tag == DW_TAG_base_type) {
+        parse_base_type_info(addrs, cu_offset, final_abbrev, final_entry, 
                             address_size, param);
     } else {
         set_unknown_type(param);
@@ -1231,7 +1414,30 @@ parse_location_attribute(const struct Dwarf_Addrs *addrs, const void **entry, ui
     }
     
     if (buf_size > 0) {
-        if (buf[0] == DW_OP_fbreg) {
+        /* From DWARF4 specification, Section 2.6.1.1.2 "Register Location Descriptions":
+         * "DW_OP_reg0, DW_OP_reg1, ..., DW_OP_reg31 - The DW_OP_regn operations encode the names of
+         * up to 32 registers, numbered from 0 through 31, inclusive. The object addressed is in register n."
+         * 
+         * From System V x86-64 ABI, Section 3.6.2 "DWARF Register Number Mapping", Figure 3.36:
+         * Register 5 = %rdi (first parameter)
+         * Register 4 = %rsi (second parameter)
+         * 
+         * Если параметр находится в регистре, мы не можем прочитать его значение напрямую в backtrace,
+         * так как регистры вызывающей функции не сохранены. В этом случае param_address остаётся 0,
+         * и будет использован fallback на стандартные смещения ABI. Однако, для параметров в регистрах
+         * fallback неправилен, так как они передаются через регистры, а не через стек.
+         * 
+         * Для минимальной реализации: если location указывает на регистр, оставляем param_address = 0,
+         * что вызовет fallback. Хотя это технически неправильно для регистровых параметров, это может
+         * работать, если вызываемая функция сохранила регистр в стек.
+         */
+        if (buf[0] >= DW_OP_reg0 && buf[0] <= DW_OP_reg31) {
+            /* Параметр находится в регистре. Устанавливаем специальное значение, чтобы
+             * показать, что это регистр, а не стек. Используем отрицательное значение
+             * для регистра: -1 для reg0, -2 для reg1, и т.д. */
+            *param_address = -(int64_t)(buf[0] - DW_OP_reg0 + 1);
+            return;
+        } else if (buf[0] == DW_OP_fbreg) {
             int64_t address = 0;
             size_t len = dwarf_read_leb128((char*)buf + 1, &address);
             if (len <= 4) {

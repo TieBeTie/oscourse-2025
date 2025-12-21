@@ -335,7 +335,14 @@
  * DW_OP_fbreg для смещений от frame base, DW_OP_call_frame_cfa для CFA (Call Frame Address).
  */
 #define DW_OP_addr           0x03
+#define DW_OP_reg0           0x50
+#define DW_OP_reg1           0x51
+#define DW_OP_reg2           0x52
+#define DW_OP_reg3           0x53
+#define DW_OP_reg4           0x54
+#define DW_OP_reg5           0x55  /* Register 5 = %rdi (first parameter in x86-64 ABI) */
 #define DW_OP_reg6           0x56
+#define DW_OP_reg31          0x6f  /* Register 31 */
 #define DW_OP_breg6          0x76  /* Base register 6 (RBP) + signed LEB128 offset */
 #define DW_OP_fbreg          0x91
 #define DW_OP_call_frame_cfa 0x9c

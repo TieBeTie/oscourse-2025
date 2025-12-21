@@ -112,22 +112,29 @@ print_single_parameter(const struct Dwarf_VarInfo *param, uintptr_t rbp, uintptr
         cprintf("%s %s=", param->type_name, param->name);
     }
     
-    /* From System V x86-64 ABI, Section 3.2.2 "The Stack Frame":
-     * "Parameters are passed on the stack in the caller's frame. The first parameter is at 16(%rbp),
-     * the second at 24(%rbp), and so on."
+    /* From System V x86-64 ABI, Section 3.2.3 "Parameter Passing":
+     * Первые 6 целочисленных/указательных параметров передаются через регистры:
+     * %rdi, %rsi, %rdx, %rcx, %r8, %r9. Остальные - через стек.
+     * 
+     * From DWARF4 specification, Section 2.6.1.1.2 "Register Location Descriptions":
+     * Если location expression содержит DW_OP_reg*, параметр находится в регистре.
      * 
      * From DWARF4 specification, Section 2.5.1.2 "Register Based Addressing":
      * "The DW_OP_fbreg operation provides a signed LEB128 offset from the address specified by
      * the location description in the DW_AT_frame_base attribute of the current function."
      * 
+     * Если location list указывает на регистр (param->address < 0), параметр находится в регистре
+     * вызывающей функции, и мы не можем его прочитать из стека напрямую. В этом случае пытаемся
+     * прочитать из стандартного места, где функция могла сохранить регистр (хотя это не гарантировано).
+     * 
      * Если location list недоступна (param->address == 0), используем fallback на стандартные
-     * смещения из System V x86-64 ABI: первый параметр на 16(%rbp), второй на 24(%rbp), и т.д.
-     * Это позволяет читать параметры даже когда секция .debug_loc не загружена.
+     * смещения из System V x86-64 ABI для параметров, передаваемых через стек.
      */
     int64_t offset;
     uintptr_t base_rbp;
     if (param->address == 0) {
-        /* Fallback на стандартные смещения из ABI - параметры в стеке вызывающей функции */
+        /* Fallback на стандартные смещения из ABI - параметры в стеке вызывающей функции.
+         * Но это работает только для параметров, передаваемых через стек (7-й и далее). */
         offset = 16 + param_index * 8;
         base_rbp = next_rbp;  /* Параметры находятся в стеке вызывающей функции */
     } else {
